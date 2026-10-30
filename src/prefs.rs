@@ -234,13 +234,11 @@ const PAGE: &str = r##"<!doctype html>
   /* Fixed columns: long CDK alarm names get the room, the rest stay narrow. */
   .disc table { table-layout: fixed; }
   .disc col.w { width: 30px; } .disc col.now { width: 78px; } .disc col.cond { width: 30%; } .disc col.sev { width: 96px; }
-  .disc.all col.w { width: 0; }
   .disc td.name { font-size: 12px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
   .disc td.cond { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .disc td.narrow { width: auto; }
   .disc select { max-width: 100%; }
   .disc select { width: auto; padding: 2px 4px; font-size: 12px; }
-  .disc.all .watchcol { display: none; }
   button.add { margin-bottom: 8px; }
   .st { font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 5px; background: var(--chip); }
   .st.ALARM { color: var(--danger); } .st.OK { color: var(--ok); } .st.INSUFFICIENT_DATA { color: #ff9f0a; }
@@ -415,10 +413,10 @@ function watchPanel(i) {
         <button class="small" data-act="untick-all" data-i="${i}">Untick all</button>` : ""}
     </div>
     <div class="scroll" data-scroll="disc-${i}"><table>
-      <colgroup><col class="w"><col><col class="now"><col class="cond"><col class="sev"></colgroup><thead><tr>
-      <th class="watchcol"></th><th>Alarm</th><th>Now</th><th>Condition</th><th>Severity</th></tr></thead><tbody>
+      <colgroup>${only ? `<col class="w">` : ""}<col><col class="now"><col class="cond"><col class="sev"></colgroup><thead><tr>
+      ${only ? `<th></th>` : ""}<th>Alarm</th><th>Now</th><th>Condition</th><th>Severity</th></tr></thead><tbody>
     ${found.map((a) => `<tr data-name="${esc(a.name.toLowerCase())}" data-state="${esc(a.state)}">
-      <td class="watchcol narrow"><input type="checkbox" data-act="watch" data-i="${i}" data-name="${esc(a.name)}" ${include.includes(a.name) ? "checked" : ""}></td>
+      ${only ? `<td><input type="checkbox" data-act="watch" data-i="${i}" data-name="${esc(a.name)}" ${include.includes(a.name) ? "checked" : ""}></td>` : ""}
       <td class="name" title="${esc(a.description || a.name)}">${esc(a.name).replace(/-/g, "-<wbr>")}</td>
       <td class="narrow"><span class="st ${esc(a.state)}">${esc(a.state === "INSUFFICIENT_DATA" ? "NO DATA" : a.state)}</span></td>
       <td class="cond" title="${esc(a.metric || "")}">${esc(a.metric || "")}</td>
