@@ -26,6 +26,10 @@ fn default_wait() -> u64 {
     20
 }
 
+fn default_max_priority() -> u8 {
+    2
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiConfig {
     #[serde(default = "yes")]
@@ -167,6 +171,41 @@ pub struct IotConfig {
     pub topics: Vec<String>,
 }
 
+/// Linear issues: yours, and urgent ones in the teams you watch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// A personal API key (Linear > Settings > Security & access). Falls back
+    /// to the `LINEAR_API_KEY` environment variable when empty.
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_interval")]
+    pub interval_secs: u64,
+    /// Tell me when an issue is assigned to me or changes state.
+    #[serde(default = "yes")]
+    pub assigned_to_me: bool,
+    /// Team keys to watch for high-priority issues, e.g. `["APO"]`.
+    #[serde(default)]
+    pub teams: Vec<String>,
+    /// Watch team issues up to this priority: 1 urgent, 2 high, 3 medium.
+    #[serde(default = "default_max_priority")]
+    pub max_priority: u8,
+}
+
+impl Default for LinearConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+            interval_secs: default_interval(),
+            assigned_to_me: true,
+            teams: Vec::new(),
+            max_priority: default_max_priority(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// Show islands without expanding or sounds.
@@ -187,6 +226,8 @@ pub struct Config {
     pub sqs: SqsConfig,
     #[serde(default)]
     pub iot: IotConfig,
+    #[serde(default)]
+    pub linear: LinearConfig,
     /// Applied to alarms from every source (poll, SQS, local API).
     #[serde(default)]
     pub alarm_rules: Vec<AlarmRule>,
@@ -203,6 +244,7 @@ impl Default for Config {
             cloudwatch: CloudWatchConfig::default(),
             sqs: SqsConfig::default(),
             iot: IotConfig::default(),
+            linear: LinearConfig::default(),
             alarm_rules: Vec::new(),
         }
     }
@@ -294,6 +336,9 @@ mod tests {
         assert_eq!(c.cloudwatch.interval_secs, 60);
         assert_eq!(c.sqs.wait_secs, 20);
         assert!(!c.iot.enabled);
+        assert!(!c.linear.enabled);
+        assert!(c.linear.assigned_to_me);
+        assert_eq!(c.linear.max_priority, 2);
         assert!(c.alarm_rules.is_empty());
     }
 

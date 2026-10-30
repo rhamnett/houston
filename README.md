@@ -6,8 +6,8 @@ Mission control that lives in your MacBook notch. When something breaks in
 prod, Houston peeks out to tell you. When nothing's broken, it keeps quiet.
 
 It's a Dynamic-Island style notification area for macOS, written in Rust with
-tao, wry and tray-icon. It shows CloudWatch alarms, Security Hub findings and
-anything else that can post JSON, and new sources plug in behind one small
+tao, wry and tray-icon. It shows CloudWatch alarms, Security Hub findings,
+Linear issues and anything else that can post JSON, and new sources plug in behind one small
 trait.
 
 ![A CloudWatch alarm peeking out of the notch](docs/peek.png)
@@ -129,6 +129,7 @@ Built in:
 | `api`        | HTTP on `127.0.0.1:7878`                                           | on      |
 | `cloudwatch` | polls `describe-alarms --state-value ALARM` per profile and region | off     |
 | `sqs`        | long-polls an SQS queue fed by EventBridge or SNS                  | off     |
+| `linear`     | your Linear issues, and urgent ones in the teams you watch         | off     |
 | `iot`        | **stub**: AWS IoT Core MQTT subscriber (live call events)          | off     |
 
 The AWS sources shell out to the `aws` CLI, so SSO profiles and credential
@@ -221,6 +222,34 @@ the first matching rule wins, so put specific patterns first:
 - `mute`: drop the alarm.
 - `runbook_url`: adds a **Runbook ↗** button.
 
+### Linear
+
+```json
+"linear": {
+  "enabled": true,
+  "api_key": "lin_api_…",
+  "interval_secs": 60,
+  "assigned_to_me": true,
+  "teams": ["APO"],
+  "max_priority": 2
+}
+```
+
+Create a personal API key under Linear > Settings > Security & access. It
+needs read access, plus write access if you want **Take it** to work. Leave
+`api_key` empty to use the `LINEAR_API_KEY` environment variable instead. The
+config file is mode 0600.
+
+- **Your issues**: an island when an issue is assigned to you, or when its
+  state, priority or assignee changes. Edits to the title or description stay
+  quiet. Launch is quiet too: the first poll only records what's there.
+- **Watched teams**: issues in `teams` at `max_priority` or above (1 urgent,
+  2 high, 3 medium) stay sticky until they're completed, cancelled or
+  downgraded. Urgent is critical and high is a warning.
+- **Open in Linear ↗** opens the issue. **Take it** (on issues that aren't
+  yours) assigns the issue to you and polls again straight away.
+- A bad key or an outage shows as "Lost signal from Linear".
+
 ### AWS IoT Core (stub)
 
 `src/sources/iot.rs` has the config and the mapping, but no MQTT client yet.
@@ -267,7 +296,7 @@ the terminal otherwise.
 - `src/island.rs`: the notification model and validation
 - `src/store.rs`: active islands, expiry, snooze, dismissal, ordering
 - `src/source.rs`: the `Source` trait, `Sink` and `Registry`
-- `src/sources/`: `demo`, `local_api`, `cloudwatch`, `sqs`, `iot` (stub)
+- `src/sources/`: `demo`, `local_api`, `cloudwatch`, `sqs`, `linear`, `iot` (stub)
 - `src/aws.rs`: the AWS CLI runner, the alarm and findings mappers, alarm rules
 - `src/overlay.rs`: the overlay window and the island page (HTML/CSS/JS)
 - `src/notch.rs`: notch geometry, window level and Spaces, the hover monitor
@@ -277,6 +306,7 @@ the terminal otherwise.
 
 ```bash
 cargo test                    # mappers, store, rules, config
+cargo test -- --ignored       # also hits live APIs (Linear auth check)
 cargo clippy --all-targets    # kept warning-free
 cargo fmt
 ```

@@ -3,6 +3,7 @@
 mod cloudwatch;
 mod demo;
 mod iot;
+mod linear;
 mod local_api;
 mod sqs;
 
@@ -34,6 +35,9 @@ pub fn from_config(config: &Config) -> Vec<Box<dyn Source>> {
             config.alarm_rules.clone(),
             config.aws_cli.clone(),
         )));
+    }
+    if config.linear.enabled {
+        sources.push(Box::new(linear::Linear::new(config.linear.clone())));
     }
     if config.iot.enabled {
         sources.push(Box::new(iot::Iot::new(config.iot.clone())));
