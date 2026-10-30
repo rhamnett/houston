@@ -303,6 +303,55 @@ const WING = 56, NOTCH_CLEAR = 6, PEEK_W = 380, EXPANDED_W = 440, MAX_H = 470;
 const PEEK_SIDE = 90, EXPANDED_SIDE = 150;
 let state = null;
 
+/* Update the DOM in place instead of replacing it, so cards that are already
+   showing don't replay their entrance, progress bars glide, and pulses keep
+   their rhythm. Children with data-key are matched by key, others by position. */
+function patch(el, html) {
+  if (el._html === html) return;
+  el._html = html;
+  const t = document.createElement("template");
+  t.innerHTML = html;
+  morphChildren(el, t.content);
+}
+function morphNode(o, n) {
+  if (o.nodeType !== n.nodeType || o.nodeName !== n.nodeName) { o.replaceWith(n); return; }
+  if (o.nodeType === Node.TEXT_NODE) { if (o.nodeValue !== n.nodeValue) o.nodeValue = n.nodeValue; return; }
+  if (o.nodeType !== Node.ELEMENT_NODE) return;
+  for (const a of [...o.attributes]) if (!n.hasAttribute(a.name)) o.removeAttribute(a.name);
+  for (const a of [...n.attributes]) if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+  morphChildren(o, n);
+}
+function morphChildren(parent, next) {
+  const incoming = [...next.childNodes];
+  const keyOf = (c) => c.nodeType === Node.ELEMENT_NODE ? c.dataset.key : undefined;
+  if (incoming.some(keyOf)) {
+    const old = new Map();
+    for (const c of [...parent.childNodes]) {
+      const k = keyOf(c);
+      if (k && !old.has(k)) old.set(k, c); else c.remove();
+    }
+    const wanted = new Set(incoming.map(keyOf));
+    for (const [k, c] of old) if (!wanted.has(k)) { c.remove(); old.delete(k); }
+    // Survivors stay attached (re-attaching would restart their animations);
+    // only new or reordered nodes move.
+    let cursor = parent.firstChild;
+    for (const n of incoming) {
+      const o = old.get(keyOf(n));
+      if (o) {
+        morphNode(o, n);
+        if (o === cursor) { cursor = cursor.nextSibling; continue; }
+        parent.insertBefore(o, cursor);
+      } else {
+        parent.insertBefore(n, cursor);
+      }
+    }
+    return;
+  }
+  const current = [...parent.childNodes];
+  incoming.forEach((n, i) => (current[i] ? morphNode(current[i], n) : parent.appendChild(n)));
+  for (const c of current.slice(incoming.length)) c.remove();
+}
+
 function clock(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, sec = s % 60;
@@ -380,7 +429,7 @@ function card(i, interactive) {
   const fields = i.fields.length ? `<dl class="fields">${i.fields.map((f) => `<dt>${esc(f.label)}</dt><dd>${esc(f.value)}</dd>`).join("")}</dl>` : "";
   const actions = interactive && i.actions.length ? `<div class="actions">${i.actions.map((a) =>
     `<button class="${a.role}" data-id="${esc(i.id)}" data-action="${esc(a.id)}">${esc(a.label)}</button>`).join("")}</div>` : "";
-  return `<div class="card sev-${i.severity}">
+  return `<div class="card sev-${i.severity}" data-key="${esc(i.id)}">
     <div class="row"><div class="badge">${esc(i.icon || "🔔")}</div>
       <div class="titles"><div class="title">${esc(i.title)}</div>${i.subtitle ? `<div class="sub">${esc(i.subtitle)}</div>` : ""}</div>
       <div class="when" data-ts="${i.updated_ms}">${ago(i.updated_ms)}</div>
@@ -418,18 +467,21 @@ function render() {
   const nh = state.notch.height, nw = state.notch.width;
   const lead = state.islands[0];
   let mode = state.mode, w = nw, h = nh, radius = Math.min(12, nh / 2.4), ear = 8;
-  el.className = `island mode-${mode}`;
-  if (lead) el.classList.add(`sev-${lead.severity}`);
-  if (state.islands.some((i) => i.severity === "critical") && mode !== "expanded") el.classList.add("alarm");
+  const alarm = state.islands.some((i) => i.severity === "critical") && mode !== "expanded";
+  const hidden = mode === "idle" && !state.notch.has_notch;
+  // Set the class once, unchanged when nothing changed, so the glow keeps going.
+  const cls = ["island", `mode-${mode}`, lead && `sev-${lead.severity}`, alarm && "alarm", hidden && "hidden"]
+    .filter(Boolean).join(" ");
+  if (el.className !== cls) el.className = cls;
 
   if (mode === "compact") {
     const k = lead.kind;
     const glyph = k.type === "progress" ? `${ring(k.value)}<span style="font-size:9px">${esc(lead.icon || "")}</span>` : esc(lead.icon || "🔔");
     $("wl").className = `wl sev-${lead.severity}`;
-    $("wl").innerHTML = `<div class="glyph">${glyph}</div>${lead.severity === "critical" ? `<div class="pulse"></div>` : ""}`;
+    patch($("wl"), `<div class="glyph">${glyph}</div>${lead.severity === "critical" ? `<div class="pulse"></div>` : ""}`);
     $("wr").className = `wr sev-${lead.severity}`;
     $("wr").style.color = `var(--${lead.severity === "info" ? "fg" : lead.severity})`;
-    $("wr").innerHTML = compactText(lead) + (state.islands.length > 1 ? `<span class="more">+${state.islands.length - 1}</span>` : "");
+    patch($("wr"), compactText(lead) + (state.islands.length > 1 ? `<span class="more">+${state.islands.length - 1}</span>` : ""));
     // Size both wings to the wider content so nothing runs under the notch and
     // the island stays centred on it.
     $("wl").style.width = $("wr").style.width = "auto";
@@ -445,11 +497,9 @@ function render() {
     w = mode === "peek" ? Math.max(PEEK_W, side + 2 * PEEK_SIDE) : Math.max(EXPANDED_W, side + 2 * EXPANDED_SIDE);
     radius = 26; ear = 14;
     content.style.width = `${w}px`;
-    content.innerHTML = mode === "peek" ? peek(nh) : expanded(nh);
+    patch(content, mode === "peek" ? peek(nh) : expanded(nh));
     h = Math.min(MAX_H, content.scrollHeight);
   }
-  const hidden = mode === "idle" && !state.notch.has_notch;
-  el.classList.toggle("hidden", hidden);
   el.style.width = `${w}px`;
   el.style.height = `${h}px`;
   el.style.borderRadius = `0 0 ${radius}px ${radius}px`;

@@ -234,6 +234,35 @@ fn error_island(err: &str) -> Island {
     .ttl(600)
 }
 
+const WHOAMI: &str = "query { viewer { name } teams(first: 50) { nodes { key } } }";
+
+#[derive(Debug, Deserialize)]
+struct WhoAmI {
+    viewer: Named,
+    teams: TeamNodes,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamNodes {
+    nodes: Vec<Keyed>,
+}
+
+/// For the Test button in Preferences: who the key belongs to, and the team
+/// keys it can see (what `teams` takes).
+pub fn probe(config: &LinearConfig) -> Result<String, String> {
+    let who: WhoAmI = Linear::new(config.clone()).graphql(WHOAMI, json!({}))?;
+    let keys: Vec<String> = who.teams.nodes.into_iter().map(|t| t.key).collect();
+    Ok(format!(
+        "Signed in as {}. Teams: {}.",
+        who.viewer.name,
+        if keys.is_empty() {
+            "none".into()
+        } else {
+            keys.join(", ")
+        }
+    ))
+}
+
 pub struct Linear {
     config: LinearConfig,
     agent: ureq::Agent,

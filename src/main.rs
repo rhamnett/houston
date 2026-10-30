@@ -1,5 +1,6 @@
-//! A Dynamic-Island style notification area in the MacBook notch. Sources
-//! (a demo, a local HTTP API, CloudWatch polling, an SQS queue) post islands;
+//! Houston: a Dynamic-Island style notification area in the MacBook notch.
+//! Sources (a demo, a local HTTP API, CloudWatch polling, an SQS queue,
+//! Linear) post islands;
 //! new ones expand out of the notch for a few seconds, then sit either side of
 //! it until they expire or are dismissed. Hover the notch to see them all.
 
@@ -11,6 +12,8 @@ mod log;
 mod notch;
 mod notify;
 mod overlay;
+mod prefs;
+mod secrets;
 mod source;
 mod sources;
 mod store;
@@ -20,8 +23,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use objc2::MainThreadMarker;
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use serde_json::{Value, json};
+use tao::event::{Event, StartCause, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -32,6 +36,8 @@ use config::Config;
 use island::{Severity, is_web_url};
 use notch::{Geometry, Rect};
 use overlay::{IslandView, Mode, Overlay, OverlayMessage, OverlayState};
+use prefs::{Prefs, PrefsMessage, SecretFlags};
+use secrets::Secret;
 use source::{Inbound, Registry, SourceEvent};
 use store::{Store, Upsert};
 
@@ -39,9 +45,14 @@ use store::{Store, Upsert};
 pub enum UserEvent {
     Source {
         source: String,
+        /// Which run of the source sent it; stale runs are ignored.
+        generation: u64,
         event: SourceEvent,
     },
     Overlay(OverlayMessage),
+    Prefs(PrefsMessage),
+    /// A finished background check (a Test button) for the Preferences page.
+    PrefsReply(Value),
     Menu(MenuEvent),
     /// The pointer moved onto the island.
     HoverEnter,
@@ -96,6 +107,22 @@ struct MenuIds {
     clear: MenuId,
     copy_token: MenuId,
     config: MenuId,
+    prefs: MenuId,
+}
+
+/// Tray menu items whose text or state follows the config.
+struct MenuItems {
+    dnd: CheckMenuItem,
+    api_info: MenuItem,
+    copy_token: MenuItem,
+}
+
+fn api_label(config: &Config) -> String {
+    if config.api.enabled {
+        format!("API on 127.0.0.1:{}", config.api.port)
+    } else {
+        "API off".into()
+    }
 }
 
 struct App {
@@ -115,8 +142,10 @@ struct App {
     statuses: Vec<String>,
     last_render: String,
     tray: TrayIcon,
-    dnd_item: CheckMenuItem,
+    items: MenuItems,
     menu: MenuIds,
+    prefs: Option<Prefs>,
+    proxy: EventLoopProxy<UserEvent>,
 }
 
 impl App {
@@ -190,7 +219,10 @@ impl App {
         let _ = self.tray.set_tooltip(Some(tip.join("\n")));
     }
 
-    fn on_source(&mut self, source: String, event: SourceEvent) {
+    fn on_source(&mut self, source: String, generation: u64, event: SourceEvent) {
+        if !self.registry.is_current(&source, generation) {
+            return; // a run that was stopped by a settings change
+        }
         match event {
             SourceEvent::Upsert(island) => {
                 let severity = island.severity;
@@ -223,6 +255,9 @@ impl App {
                 self.statuses
                     .retain(|s| !s.starts_with(&format!("{source}:")));
                 self.statuses.push(format!("{source}: {msg}"));
+                if let Some(p) = &self.prefs {
+                    p.send(&json!({"type": "status", "statuses": self.statuses}));
+                }
             }
         }
         self.render();
@@ -284,7 +319,7 @@ impl App {
 
     fn set_dnd(&mut self, on: bool) {
         self.config.do_not_disturb = on;
-        self.dnd_item.set_checked(on);
+        self.items.dnd.set_checked(on);
         if on {
             self.peek = None;
         }
@@ -299,7 +334,7 @@ impl App {
             self.registry
                 .send(sources::DEMO_ID, Inbound::Trigger((*trigger).into()));
         } else if *id == self.menu.dnd {
-            self.set_dnd(self.dnd_item.is_checked());
+            self.set_dnd(self.items.dnd.is_checked());
         } else if *id == self.menu.clear {
             self.store.clear();
         } else if *id == self.menu.copy_token {
@@ -310,6 +345,171 @@ impl App {
             let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
         }
         self.render();
+    }
+
+    fn open_prefs(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        if let Some(p) = &self.prefs {
+            return p.focus();
+        }
+        match Prefs::open(target, self.proxy.clone()) {
+            Ok(p) => self.prefs = Some(p),
+            Err(e) => log::line(&format!("preferences: {e}")),
+        }
+    }
+
+    fn prefs_state(&self, reset: bool) -> Value {
+        json!({
+            "type": "state",
+            "reset": reset,
+            "config": self.config.without_secrets(),
+            "secrets": SecretFlags {
+                api_token: !self.config.api.token.is_empty(),
+                linear_api_key: !self.config.linear.api_key.is_empty(),
+            },
+            "statuses": self.statuses,
+        })
+    }
+
+    fn reply(&self, msg: Value) {
+        if let Some(p) = &self.prefs {
+            p.send(&msg);
+        }
+    }
+
+    /// Run `work` off the main thread and send its answer to the page.
+    fn in_background(
+        &self,
+        id: String,
+        work: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let (ok, text) = match work() {
+                Ok(t) => (true, t),
+                Err(e) => (false, e),
+            };
+            let _ = proxy.send_event(UserEvent::PrefsReply(
+                json!({"type": "test", "id": id, "ok": ok, "text": text}),
+            ));
+        });
+    }
+
+    fn on_prefs(&mut self, msg: PrefsMessage) {
+        match msg {
+            PrefsMessage::Ready => self.reply(self.prefs_state(true)),
+            PrefsMessage::Save { config, secrets } => {
+                let reply = match self.apply_prefs(config, &secrets) {
+                    Ok(restarted) => json!({"type": "saved", "restarted": restarted}),
+                    Err(e) => json!({"type": "saved", "error": e}),
+                };
+                let ok = reply.get("error").is_none();
+                self.reply(reply);
+                if ok {
+                    self.reply(self.prefs_state(true));
+                }
+            }
+            PrefsMessage::TestCloudwatch {
+                id,
+                account,
+                aws_cli,
+            } => {
+                self.in_background(id, move || {
+                    sources::probe_cloudwatch(&account, aws_cli.as_deref())
+                });
+            }
+            PrefsMessage::TestLinear {
+                id,
+                mut linear,
+                api_key,
+            } => {
+                linear.api_key = api_key
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or_else(|| self.config.linear.api_key.clone());
+                self.in_background(id, move || sources::probe_linear(&linear));
+            }
+            PrefsMessage::TestRule { name, rules } => {
+                let alarm = aws::AlarmState {
+                    name,
+                    ..Default::default()
+                };
+                self.reply(json!({"type": "rule", "index": alarm.rule_index(&rules)}));
+            }
+            PrefsMessage::CopyToken => {
+                copy_to_clipboard(&self.config.api.token);
+                self.reply(
+                    json!({"type": "token", "ok": true, "text": "Copied to the clipboard."}),
+                );
+            }
+            PrefsMessage::RegenerateToken => {
+                let text = match self
+                    .config
+                    .set_secret(Secret::ApiToken, &config::random_token())
+                {
+                    Ok(()) => {
+                        self.restart_sources(&["api"]);
+                        Ok("New token in the Keychain. The API restarted with it.")
+                    }
+                    Err(e) => Err(e),
+                };
+                let (ok, text) = match text {
+                    Ok(t) => (true, t.to_string()),
+                    Err(e) => (false, e),
+                };
+                self.reply(json!({"type": "token", "ok": ok, "text": text}));
+            }
+            PrefsMessage::OpenConfigFolder => {
+                if let Some(dir) = Config::dir() {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
+                }
+            }
+            PrefsMessage::Close => self.prefs = None,
+        }
+        self.render();
+    }
+
+    /// Validate and save a config from Preferences, store changed secrets in
+    /// the Keychain and restart the sources whose settings changed.
+    fn apply_prefs(
+        &mut self,
+        value: Value,
+        secret_edits: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<String>, String> {
+        let mut next: Config =
+            serde_json::from_value(value).map_err(|e| format!("Couldn't read the form: {e}"))?;
+        next.keep_secrets(&self.config);
+        next.validate()?;
+        for (account, value) in secret_edits {
+            let secret = Secret::ALL
+                .into_iter()
+                .find(|s| s.account() == account)
+                .filter(|s| *s != Secret::ApiToken)
+                .ok_or_else(|| format!("Unknown secret {account}"))?;
+            next.set_secret(secret, value.trim())?;
+        }
+        let changed: Vec<&str> = sources::RESTARTABLE
+            .iter()
+            .copied()
+            .filter(|id| sources::fingerprint(id, &self.config) != sources::fingerprint(id, &next))
+            .collect();
+        let dnd = next.do_not_disturb;
+        self.config = next;
+        self.config.save()?;
+        self.set_dnd(dnd);
+        self.restart_sources(&changed);
+        Ok(changed.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn restart_sources(&mut self, ids: &[&str]) {
+        for id in ids {
+            self.registry.restart(id, sources::build(id, &self.config));
+            self.store.remove_source(id);
+            self.statuses.retain(|s| !s.starts_with(&format!("{id}:")));
+            if *id == "api" {
+                self.api_url = None;
+            }
+        }
+        self.items.api_info.set_text(api_label(&self.config));
+        self.items.copy_token.set_enabled(self.config.api.enabled);
     }
 
     fn hover_enter(&mut self) {
@@ -376,7 +576,7 @@ impl App {
     }
 }
 
-fn build_menu(config: &Config) -> (Menu, MenuIds, CheckMenuItem) {
+fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
     let demo = Submenu::new("Run a drill", true);
     let mut triggers = Vec::new();
     for (trigger, label) in sources::DEMO_TRIGGERS {
@@ -391,14 +591,10 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, CheckMenuItem) {
         None,
     );
     let clear = MenuItem::new("Clear the board", true, None);
-    let api_label = if config.api.enabled {
-        format!("API on 127.0.0.1:{}", config.api.port)
-    } else {
-        "API off".into()
-    };
-    let api_info = MenuItem::new(api_label, false, None);
+    let api_info = MenuItem::new(api_label(config), false, None);
     let copy_token = MenuItem::new("Copy API token", config.api.enabled, None);
     let open_config = MenuItem::new("Open config folder", true, None);
+    let prefs = MenuItem::new("Mission settings…", true, None);
     let menu = Menu::with_items(&[
         &demo,
         &PredefinedMenuItem::separator(),
@@ -409,6 +605,8 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, CheckMenuItem) {
         &copy_token,
         &open_config,
         &PredefinedMenuItem::separator(),
+        &prefs,
+        &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::quit(Some("Quit Houston (splashdown)")),
     ])
     .expect("menu");
@@ -418,8 +616,39 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, CheckMenuItem) {
         clear: clear.id().clone(),
         copy_token: copy_token.id().clone(),
         config: open_config.id().clone(),
+        prefs: prefs.id().clone(),
     };
-    (menu, ids, dnd)
+    let items = MenuItems {
+        dnd,
+        api_info,
+        copy_token,
+    };
+    (menu, ids, items)
+}
+
+/// An app menu, never shown (Houston has no Dock icon), so the standard
+/// editing shortcuts work in Preferences: paste an API key with ⌘V.
+fn install_edit_menu() -> Menu {
+    let menu = Menu::new();
+    let app = Submenu::with_items("Houston", true, &[&PredefinedMenuItem::quit(None)]);
+    let edit = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ],
+    );
+    if let (Ok(app), Ok(edit)) = (app, edit) {
+        let _ = menu.append_items(&[&app, &edit]);
+    }
+    menu.init_for_nsapp();
+    menu
 }
 
 fn main() {
@@ -434,7 +663,8 @@ fn main() {
         let _ = p.send_event(UserEvent::Menu(e));
     }));
 
-    let (menu, menu_ids, dnd_item) = build_menu(&config);
+    let (menu, menu_ids, items) = build_menu(&config);
+    let _edit_menu = install_edit_menu();
     let tray = TrayIconBuilder::new()
         .with_icon_templated(icon::island().expect("icon"))
         .with_tooltip("Houston")
@@ -442,7 +672,7 @@ fn main() {
         .build()
         .expect("status item");
 
-    let mut setup = Some((config, menu_ids, dnd_item));
+    let mut setup = Some((config, menu_ids, items));
     let mut app: Option<App> = None;
 
     event_loop.run(move |event, target, control_flow| {
@@ -451,7 +681,7 @@ fn main() {
         };
         // The overlay needs the event loop target, so it is built on the first event.
         if app.is_none() {
-            let Some((config, menu, dnd_item)) = setup.take() else {
+            let Some((config, menu, items)) = setup.take() else {
                 return;
             };
             let Some(geometry) = notch::detect(mtm) else {
@@ -496,16 +726,32 @@ fn main() {
                 statuses: Vec::new(),
                 last_render: String::new(),
                 tray: tray.clone(),
-                dnd_item,
+                items,
                 menu,
+                prefs: None,
+                proxy: proxy.clone(),
             });
         }
         let Some(app) = app.as_mut() else { return };
 
         match event {
-            Event::UserEvent(UserEvent::Source { source, event }) => app.on_source(source, event),
+            Event::UserEvent(UserEvent::Source {
+                source,
+                generation,
+                event,
+            }) => app.on_source(source, generation, event),
             Event::UserEvent(UserEvent::Overlay(msg)) => app.on_overlay(msg),
+            Event::UserEvent(UserEvent::Menu(e)) if *e.id() == app.menu.prefs => {
+                app.open_prefs(target)
+            }
             Event::UserEvent(UserEvent::Menu(e)) => app.on_menu(e),
+            Event::UserEvent(UserEvent::Prefs(msg)) => app.on_prefs(msg),
+            Event::UserEvent(UserEvent::PrefsReply(msg)) => app.reply(msg),
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::CloseRequested,
+                ..
+            } if app.prefs.as_ref().is_some_and(|p| p.id() == window_id) => app.prefs = None,
             Event::UserEvent(UserEvent::HoverEnter) => app.hover_enter(),
             Event::NewEvents(StartCause::Init) => app.render(),
             _ => {}

@@ -361,7 +361,12 @@ fn glob(pattern: &str, text: &str) -> bool {
 impl AlarmState {
     /// The first rule whose pattern matches this alarm's name.
     fn rule<'a>(&self, rules: &'a [AlarmRule]) -> Option<&'a AlarmRule> {
-        rules.iter().find(|r| glob(&r.pattern, &self.name))
+        self.rule_index(rules).map(|i| &rules[i])
+    }
+
+    /// Its position, for Preferences' "Which rule?".
+    pub fn rule_index(&self, rules: &[AlarmRule]) -> Option<usize> {
+        rules.iter().position(|r| glob(&r.pattern, &self.name))
     }
 
     /// The island after `alarm_rules`; `None` when a rule mutes the alarm.

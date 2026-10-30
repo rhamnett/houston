@@ -10,6 +10,8 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -40,6 +42,17 @@ impl LocalApi {
     pub fn new(port: u16, token: String, rules: Vec<AlarmRule>) -> Self {
         Self { port, token, rules }
     }
+}
+
+/// Bind, waiting briefly for a restarted API to let go of the port.
+fn bind(port: u16) -> Option<TcpListener> {
+    for _ in 0..20 {
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", port)) {
+            return Some(l);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
 }
 
 fn read_request(stream: &TcpStream) -> Result<Request, String> {
@@ -197,38 +210,48 @@ impl Source for LocalApi {
     }
 
     fn run(self: Box<Self>, sink: Sink, inbox: Receiver<Inbound>) {
-        let listener = match TcpListener::bind(("127.0.0.1", self.port)) {
-            Ok(l) => l,
-            Err(e) => {
-                sink.status(format!("local API on port {}: {e}", self.port));
-                return;
-            }
+        let Some(listener) = bind(self.port) else {
+            sink.status(format!("local API: port {} is in use", self.port));
+            return;
         };
-        sink.status(format!("local API on http://127.0.0.1:{}", self.port));
-        // Islands posted here have no one to call back; log custom actions.
-        std::thread::spawn(move || {
-            for msg in inbox {
-                if let Inbound::Action { key, action } = msg {
-                    crate::log::line(&format!("api: action {action} on {key}"));
-                }
-            }
-        });
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+        let port = self.port;
+        sink.status(format!("local API on http://127.0.0.1:{port}"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let stop = stop.clone();
             let sink = sink.clone();
-            let token = self.token.clone();
-            let rules = self.rules.clone();
             std::thread::spawn(move || {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                match read_request(&stream) {
-                    Ok(req) => {
-                        let (status, body) = handle(&req, &token, &rules, &sink);
-                        respond(&stream, status, &body);
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::Relaxed) {
+                        break; // dropping the listener frees the port
                     }
-                    Err(e) => respond(&stream, 400, &json!({"error": e})),
+                    let Ok(stream) = stream else { continue };
+                    let sink = sink.clone();
+                    let token = self.token.clone();
+                    let rules = self.rules.clone();
+                    std::thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        match read_request(&stream) {
+                            Ok(req) => {
+                                let (status, body) = handle(&req, &token, &rules, &sink);
+                                respond(&stream, status, &body);
+                            }
+                            Err(e) => respond(&stream, 400, &json!({"error": e})),
+                        }
+                    });
                 }
-            });
+            })
+        };
+        // Islands posted here have no one to call back; log custom actions.
+        for msg in inbox {
+            if let Inbound::Action { key, action } = msg {
+                crate::log::line(&format!("api: action {action} on {key}"));
+            }
         }
+        // Restarted or quitting: wake the accept loop so it sees `stop`.
+        stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(("127.0.0.1", port));
+        let _ = accept.join();
     }
 }
 

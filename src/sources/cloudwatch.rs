@@ -49,6 +49,32 @@ impl CloudWatch {
     }
 }
 
+/// One poll for the Test button in Preferences: a one-line summary.
+pub fn probe(account: &AwsAccount, cli: Option<&str>) -> Result<String, String> {
+    let cw = CloudWatch::new(
+        CloudWatchConfig::default(),
+        Vec::new(),
+        cli.map(String::from),
+    );
+    let alarms = cw.poll(account)?;
+    Ok(match alarms.len() {
+        0 => format!("Connected to {}. No alarms in ALARM.", label(account)),
+        n => {
+            let names: Vec<&str> = alarms.iter().take(3).map(|a| a.name.as_str()).collect();
+            let more = if n > 3 {
+                format!(" and {} more", n - 3)
+            } else {
+                String::new()
+            };
+            format!(
+                "Connected to {}. {n} in ALARM: {}{more}.",
+                label(account),
+                names.join(", ")
+            )
+        }
+    })
+}
+
 fn label(account: &AwsAccount) -> String {
     account
         .label

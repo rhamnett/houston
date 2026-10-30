@@ -30,10 +30,42 @@ Then send your first transmission from another terminal:
 scripts/houston "Houston, we have a problem" "it's only a test" warning
 ```
 
-To point it at real alarms, edit
-`~/Library/Application Support/houston/config.json` (created on first run;
-**Open config folder** in the menu takes you there), turn on a source and
-restart. See [Sources](#sources-the-plug-in-seam).
+To point it at real alarms, open **Mission settings…** from the menu bar
+icon, turn on a source and save. Only the sources whose settings changed are
+restarted. See [Sources](#sources-the-plug-in-seam).
+
+## Mission settings (preferences)
+
+Sections: General, CloudWatch, SQS, Linear, Alarm rules, IoT Core and Local
+API.
+
+- **Test** buttons run one real call in the background: a `describe-alarms`
+  per CloudWatch account, or a Linear sign-in check that also lists the team
+  keys your key can see.
+- **Which rule?** takes an alarm name and highlights the rule that would win.
+- **Save** (⌘S) checks the settings, then restarts only the affected
+  sources. **Revert** throws away unsaved edits. ⌘V and the other editing
+  shortcuts work in every field.
+
+Everything is also in `~/Library/Application Support/houston/config.json`,
+apart from secrets. Hand edits there are picked up at the next launch.
+
+## Secrets live in the Keychain
+
+The local API token and the Linear API key are stored in your login Keychain
+under the service `local.houston`, never in `config.json`. Mission settings
+can replace or remove a secret, but never reads one back: it only shows
+"🔒 in Keychain". A secret found in the config file (from an older version,
+or a hand edit) is moved to the Keychain and blanked on the next launch.
+
+```bash
+security find-generic-password -s local.houston -a api-token -w   # what scripts/houston does
+```
+
+The Keychain ties each item to the app that created it. After a rebuild,
+macOS asks once whether the new binary may read it: choose **Always Allow**.
+Builds from `cargo run` prompt after every rebuild. An installed
+`Houston.app` prompts only when you reinstall it.
 
 ## What it does
 
@@ -149,8 +181,9 @@ scripts/houston --remove deploy
 ```
 
 The endpoints are below. Every one except health needs
-`Authorization: Bearer <api.token>` (generated on first run; **Copy API token**
-puts it on the clipboard).
+`Authorization: Bearer <token>`. The token is generated on first run and kept
+in the Keychain. **Copy API token** in the menu, or the Local API section of
+Mission settings, puts it on the clipboard, and Regenerate replaces it.
 
 - `GET /v1/health`
 - `POST /v1/islands`: an island as JSON
@@ -198,7 +231,8 @@ A message body can also be an island JSON, so a Lambda, a pipeline or anything
 else that can write to SQS can post custom notifications. Messages are deleted
 after they are shown. This needs `sqs:ReceiveMessage` and `sqs:DeleteMessage`.
 
-Sources are read at startup, so restart after changing them.
+Change sources in Mission settings: only the affected ones restart. Hand
+edits to the file are read at the next launch.
 
 ### Alarm rules
 
@@ -227,7 +261,6 @@ the first matching rule wins, so put specific patterns first:
 ```json
 "linear": {
   "enabled": true,
-  "api_key": "lin_api_…",
   "interval_secs": 60,
   "assigned_to_me": true,
   "teams": ["APO"],
@@ -236,9 +269,10 @@ the first matching rule wins, so put specific patterns first:
 ```
 
 Create a personal API key under Linear > Settings > Security & access. It
-needs read access, plus write access if you want **Take it** to work. Leave
-`api_key` empty to use the `LINEAR_API_KEY` environment variable instead. The
-config file is mode 0600.
+needs read access, plus write access if you want **Take it** to work. Paste
+it into the Linear section of Mission settings, which stores it in the
+Keychain. Otherwise Houston falls back to the `LINEAR_API_KEY` environment
+variable.
 
 - **Your issues**: an island when an issue is assigned to you, or when its
   state, priority or assignee changes. Edits to the title or description stay
@@ -300,6 +334,8 @@ the terminal otherwise.
 - `src/aws.rs`: the AWS CLI runner, the alarm and findings mappers, alarm rules
 - `src/overlay.rs`: the overlay window and the island page (HTML/CSS/JS)
 - `src/notch.rs`: notch geometry, window level and Spaces, the hover monitor
+- `src/prefs.rs`: the Mission settings window and its page
+- `src/secrets.rs`: Keychain storage for the API token and the Linear key
 - `src/config.rs`, `src/icon.rs`, `src/notify.rs`, `src/log.rs`
 
 ## Development

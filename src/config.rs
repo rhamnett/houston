@@ -1,6 +1,10 @@
 //! Settings in ~/Library/Application Support/houston/config.json. Written
-//! with every option on first launch so it can be edited by hand; sources are
-//! read at startup, so restart after changing them.
+//! with every option on first launch so it can be edited by hand, or changed
+//! in Preferences, which restarts only the sources whose settings changed.
+//!
+//! Secrets (the API token, the Linear key) are kept in the Keychain, never in
+//! the file: see `secrets.rs`. A secret found in the file (an older version,
+//! or a hand edit) is moved to the Keychain and blanked on the next load.
 
 use std::fs;
 use std::io::Read;
@@ -9,6 +13,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::island::Severity;
+use crate::secrets::{self, Secret};
 
 fn yes() -> bool {
     true
@@ -36,7 +41,8 @@ pub struct ApiConfig {
     pub enabled: bool,
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Bearer token for every request but `/v1/health`. Generated when empty.
+    /// Bearer token for every request but `/v1/health`. Kept in the Keychain;
+    /// generated when missing.
     #[serde(default)]
     pub token: String,
 }
@@ -176,8 +182,8 @@ pub struct IotConfig {
 pub struct LinearConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// A personal API key (Linear > Settings > Security & access). Falls back
-    /// to the `LINEAR_API_KEY` environment variable when empty.
+    /// A personal API key (Linear > Settings > Security & access), kept in the
+    /// Keychain. Falls back to the `LINEAR_API_KEY` environment variable.
     #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_interval")]
@@ -250,7 +256,7 @@ impl Default for Config {
     }
 }
 
-fn random_token() -> String {
+pub fn random_token() -> String {
     let mut bytes = [0u8; 24];
     if let Ok(mut f) = fs::File::open("/dev/urandom") {
         let _ = f.read_exact(&mut bytes);
@@ -282,7 +288,78 @@ impl Config {
         Some(Self::dir()?.join("config.json"))
     }
 
-    /// Load, filling in a token and writing the file if anything was missing.
+    pub fn secret(&self, s: Secret) -> &str {
+        match s {
+            Secret::ApiToken => &self.api.token,
+            Secret::LinearApiKey => &self.linear.api_key,
+        }
+    }
+
+    fn secret_mut(&mut self, s: Secret) -> &mut String {
+        match s {
+            Secret::ApiToken => &mut self.api.token,
+            Secret::LinearApiKey => &mut self.linear.api_key,
+        }
+    }
+
+    /// Put a secret in the Keychain (empty removes it) and in memory.
+    pub fn set_secret(&mut self, s: Secret, value: &str) -> Result<(), String> {
+        secrets::set(s, value)?;
+        *self.secret_mut(s) = value.to_string();
+        Ok(())
+    }
+
+    /// Keep `from`'s secrets (Preferences never sees them, so a config it
+    /// sends back has them blank).
+    pub fn keep_secrets(&mut self, from: &Config) {
+        for s in Secret::ALL {
+            *self.secret_mut(s) = from.secret(s).to_string();
+        }
+    }
+
+    /// Problems a hand edit or Preferences could introduce, one per line.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut problems = Vec::new();
+        if self.api.enabled && self.api.port < 1024 {
+            problems.push("Local API port must be 1024 or higher.".to_string());
+        }
+        if self.sqs.enabled && !self.sqs.queue_url.starts_with("https://") {
+            problems.push("SQS queue URL must start with https://.".into());
+        }
+        if self.linear.enabled && !(1..=4).contains(&self.linear.max_priority) {
+            problems.push("Linear priority must be 1 to 4.".into());
+        }
+        for (i, r) in self.alarm_rules.iter().enumerate() {
+            if r.pattern.trim().is_empty() {
+                problems.push(format!("Alarm rule {} has no pattern.", i + 1));
+            }
+            if r.runbook_url
+                .as_deref()
+                .is_some_and(|u| !crate::island::is_web_url(u))
+            {
+                problems.push(format!(
+                    "Alarm rule {}: runbook URL must be http or https.",
+                    i + 1
+                ));
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join(" "))
+        }
+    }
+
+    /// A copy safe to write to disk or show in a page.
+    pub fn without_secrets(&self) -> Self {
+        let mut c = self.clone();
+        for s in Secret::ALL {
+            c.secret_mut(s).clear();
+        }
+        c
+    }
+
+    /// Load the file and the Keychain, generating a token on first run.
     pub fn load() -> Self {
         Self::migrate_old_dir();
         let path = Self::path();
@@ -295,9 +372,22 @@ impl Config {
             None => Self::default(),
         };
         let mut changed = existing.is_none();
-        if config.api.token.is_empty() {
-            config.api.token = random_token();
-            changed = true;
+        for s in Secret::ALL {
+            let in_file = config.secret(s).to_string();
+            if !in_file.is_empty() {
+                // Move it out of the file; keep it in memory either way.
+                match secrets::set(s, &in_file) {
+                    Ok(()) => changed = true,
+                    Err(e) => eprintln!("config: {e}; left in the file"),
+                }
+            } else if let Some(v) = secrets::get(s) {
+                *config.secret_mut(s) = v;
+            }
+        }
+        if config.api.token.is_empty()
+            && let Err(e) = config.set_secret(Secret::ApiToken, &random_token())
+        {
+            eprintln!("config: {e}");
         }
         if changed && let Err(e) = config.save() {
             eprintln!("config: {e}");
@@ -312,9 +402,9 @@ impl Config {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        let json = serde_json::to_vec_pretty(&self.without_secrets()).map_err(|e| e.to_string())?;
         fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))?;
-        // The file holds the API token.
+        // No secrets in it, but alarm names and account ids are nobody else's business.
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("{}: {e}", path.display()))
@@ -340,6 +430,34 @@ mod tests {
         assert!(c.linear.assigned_to_me);
         assert_eq!(c.linear.max_priority, 2);
         assert!(c.alarm_rules.is_empty());
+    }
+
+    #[test]
+    fn secrets_never_reach_the_file() {
+        let mut c = Config::default();
+        c.api.token = "s3cr3t-t0ken".into();
+        c.linear.api_key = "lin_api_x".into();
+        let written = serde_json::to_string(&c.without_secrets()).unwrap();
+        assert!(!written.contains("s3cr3t-t0ken") && !written.contains("lin_api_x"));
+        assert_eq!(
+            c.secret(Secret::LinearApiKey),
+            "lin_api_x",
+            "memory keeps them"
+        );
+    }
+
+    #[test]
+    fn validation() {
+        let mut c = Config::default();
+        assert!(c.validate().is_ok());
+        c.api.port = 80;
+        c.alarm_rules
+            .push(serde_json::from_str(r#"{"pattern":" ","runbook_url":"file:///x"}"#).unwrap());
+        let err = c.validate().unwrap_err();
+        assert!(
+            err.contains("port") && err.contains("no pattern") && err.contains("runbook"),
+            "{err}"
+        );
     }
 
     #[test]

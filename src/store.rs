@@ -108,6 +108,13 @@ impl Store {
         true
     }
 
+    /// Drop every island a source posted; true if any went.
+    pub fn remove_source(&mut self, source: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.island.source != source);
+        self.entries.len() != before
+    }
+
     pub fn clear(&mut self) {
         let ids: Vec<String> = self.entries.iter().map(|e| e.id.clone()).collect();
         for id in ids {

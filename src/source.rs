@@ -1,6 +1,11 @@
 //! The plug-in seam. A source runs on its own thread, posts islands through a
 //! [`Sink`], and hears back about button presses (and menu triggers) on its
-//! inbox. To add one, implement [`Source`] and list it in `sources::from_config`.
+//! inbox. To add one, implement [`Source`] and list it in `sources::build`.
+//!
+//! A source can be restarted (after its settings change) by dropping its inbox:
+//! the old thread returns when it next reads it. Every event carries the
+//! generation of the thread that sent it, so stragglers from a stopped thread
+//! are ignored.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,6 +36,7 @@ pub enum Inbound {
 #[derive(Clone)]
 pub struct Sink {
     source: String,
+    generation: u64,
     proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -38,6 +44,7 @@ impl Sink {
     fn send(&self, event: SourceEvent) {
         let _ = self.proxy.send_event(UserEvent::Source {
             source: self.source.clone(),
+            generation: self.generation,
             event,
         });
     }
@@ -66,35 +73,66 @@ pub trait Source: Send + 'static {
 
 /// The running sources, for routing messages back to them.
 pub struct Registry {
-    inboxes: HashMap<String, Sender<Inbound>>,
+    inboxes: HashMap<String, (u64, Sender<Inbound>)>,
+    next_generation: u64,
+    proxy: EventLoopProxy<UserEvent>,
 }
 
 impl Registry {
     pub fn start(sources: Vec<Box<dyn Source>>, proxy: &EventLoopProxy<UserEvent>) -> Self {
-        let mut inboxes = HashMap::new();
+        let mut registry = Self {
+            inboxes: HashMap::new(),
+            next_generation: 1,
+            proxy: proxy.clone(),
+        };
         for source in sources {
-            let id = source.id();
-            let (tx, rx) = mpsc::channel();
-            let sink = Sink {
-                source: id.clone(),
-                proxy: proxy.clone(),
-            };
-            let spawned = std::thread::Builder::new()
-                .name(format!("source:{id}"))
-                .spawn(move || source.run(sink, rx));
-            match spawned {
-                Ok(_) => {
-                    crate::log::line(&format!("source {id} started"));
-                    inboxes.insert(id, tx);
-                }
-                Err(e) => crate::log::line(&format!("source {id}: {e}")),
-            }
+            registry.spawn(source);
         }
-        Self { inboxes }
+        registry
+    }
+
+    fn spawn(&mut self, source: Box<dyn Source>) {
+        let id = source.id();
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        let (tx, rx) = mpsc::channel();
+        let sink = Sink {
+            source: id.clone(),
+            generation,
+            proxy: self.proxy.clone(),
+        };
+        let spawned = std::thread::Builder::new()
+            .name(format!("source:{id}"))
+            .spawn(move || source.run(sink, rx));
+        match spawned {
+            Ok(_) => {
+                crate::log::line(&format!("source {id} started"));
+                self.inboxes.insert(id, (generation, tx));
+            }
+            Err(e) => crate::log::line(&format!("source {id}: {e}")),
+        }
+    }
+
+    /// Stop the source called `id`, if running, and start `replacement` (its
+    /// new configuration) if there is one.
+    pub fn restart(&mut self, id: &str, replacement: Option<Box<dyn Source>>) {
+        if self.inboxes.remove(id).is_some() {
+            crate::log::line(&format!("source {id} stopped"));
+        }
+        if let Some(source) = replacement {
+            self.spawn(source);
+        }
+    }
+
+    /// Whether an event from this thread of `source` should still count.
+    pub fn is_current(&self, source: &str, generation: u64) -> bool {
+        self.inboxes
+            .get(source)
+            .is_some_and(|(g, _)| *g == generation)
     }
 
     pub fn send(&self, source: &str, msg: Inbound) {
-        if let Some(tx) = self.inboxes.get(source) {
+        if let Some((_, tx)) = self.inboxes.get(source) {
             let _ = tx.send(msg);
         }
     }

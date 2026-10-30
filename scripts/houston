@@ -6,7 +6,10 @@
 # Severity: success | info | warning | critical. HOUSTON_KEY overrides the key.
 set -euo pipefail
 CONFIG="$HOME/Library/Application Support/houston/config.json"
-read -r PORT TOKEN < <(/usr/bin/python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["api"]; print(c.get("port",7878), c["token"])' "$CONFIG")
+PORT=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("api",{}).get("port",7878))' "$CONFIG")
+# The token lives in the login Keychain, not the config file.
+TOKEN=$(/usr/bin/security find-generic-password -s local.houston -a api-token -w 2>/dev/null) || {
+  echo "houston: no API token in the Keychain; launch Houston once first" >&2; exit 1; }
 URL="http://127.0.0.1:$PORT/v1/islands"
 auth=(-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
 
