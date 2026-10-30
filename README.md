@@ -82,6 +82,23 @@ The menu bar icon shows how many warnings and criticals are active. Its menu
 has **Run a drill** (the demos), **Radio silence** (do not disturb: no peeks,
 no sounds), **Clear the board**, **Copy API token** and **Open config folder**.
 
+### macOS Focus
+
+With **Follow macOS Focus** on (the default), Houston goes quiet whenever Do
+Not Disturb or any other Focus is on: no peeks and no sounds, the same as
+Radio silence. The island's ☾ button shows the Focus by name, and the menu
+says which Focus is keeping it quiet.
+
+Apple's Focus Status API needs an entitlement that ad-hoc-signed apps can't
+have, so Houston reads the Do Not Disturb store in
+`~/Library/DoNotDisturb/DB` every 2 s instead. Two caveats:
+
+- If macOS protects that folder, the menu shows "Can't read Focus: needs Full
+  Disk Access". Mission settings > General has a button to open the right
+  pane. Add `Houston.app`, or your terminal if you use `cargo run`.
+- Only Focus modes switched on by hand (from Control Centre, a Shortcut or a
+  synced device) are in the store. Scheduled ones aren't seen.
+
 ### Mission vocabulary
 
 | You'll see             | It means                                    |
@@ -360,6 +377,7 @@ the terminal otherwise.
 - `src/notch.rs`: notch geometry, window level and Spaces, the hover monitor
 - `src/prefs.rs`: the Mission settings window and its page
 - `src/secrets.rs`: Keychain storage for the API token and the Linear key
+- `src/focus.rs`: following macOS Focus via the Do Not Disturb store
 - `src/config.rs`, `src/icon.rs`, `src/notify.rs`, `src/log.rs`
 
 ## Development

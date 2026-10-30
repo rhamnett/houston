@@ -69,6 +69,8 @@ pub enum PrefsMessage {
     },
     CopyToken,
     RegenerateToken,
+    /// System Settings › Privacy & Security › Full Disk Access.
+    OpenFullDiskAccess,
     OpenConfigFolder,
     Close,
 }
@@ -269,6 +271,7 @@ let secretEdits = {};   // account -> new value ("" removes)
 let statuses = [];
 let results = {};       // test id -> {cls, text}
 let profiles = [];      // from ~/.aws/config
+let focusNow = "", focusUnreadable = false;
 let discovered = {};    // "cw<i>" -> alarms found by Discover alarms
 let ruleHit = null;
 
@@ -434,6 +437,8 @@ const VIEWS = {
     <div class="card">
       ${row("Sounds", toggle("sounds"), "Sosumi for critical, Tink for warnings.")}
       ${row("Radio silence", toggle("do_not_disturb"), "No peeks and no sounds. Islands still collect in the notch.")}
+      ${row("Follow macOS Focus", toggle("follow_focus"), `Go quiet while Do Not Disturb or any Focus is on. ${focusNow ? `<b>${esc(focusNow)}.</b>` : ""}
+        ${focusUnreadable ? `<br><button class="small" data-act="fda">Open Full Disk Access</button> then add Houston (or your terminal, for <code>cargo run</code>) and restart it.` : "Focus modes started by a schedule aren't seen, only ones switched on by hand or by a Shortcut."}`)}
       ${row("Drills", toggle("demo.autoplay"), "Play the demo a second after Houston starts, and show drill buttons when you hover the notch. Off keeps the hover view to real notifications; drills stay in the menu.")}
       ${row("AWS CLI path", optText("aws_cli", "auto: /opt/homebrew/bin/aws"), "Only if <code>aws</code> lives somewhere unusual.")}
     </div>
@@ -664,6 +669,7 @@ document.addEventListener("click", (e) => {
     case "copy-token": post({ type: "copy_token" }); break;
     case "regen-token": post({ type: "regenerate_token" }); break;
     case "open-folder": post({ type: "open_config_folder" }); break;
+    case "fda": post({ type: "open_full_disk_access" }); break;
   }
 });
 $("save").onclick = () => { $("save").disabled = true; msg("Transmitting…", ""); post({ type: "save", config: cfg, secrets: secretEdits }); };
@@ -677,6 +683,7 @@ window.__prefs = (m) => {
   switch (m.type) {
     case "state":
       statuses = m.statuses; secretFlags = m.secrets; profiles = m.profiles || [];
+      focusNow = m.focus || ""; focusUnreadable = !!m.focus_unreadable;
       if (!saved || m.reset) { saved = m.config; cfg = structuredClone(saved); secretEdits = {}; dirty(); }
       render(); break;
     case "status": statuses = m.statuses; if (tab === "general") render(); break;

@@ -6,6 +6,7 @@
 
 mod aws;
 mod config;
+mod focus;
 mod icon;
 mod island;
 mod log;
@@ -65,6 +66,7 @@ const LEAVE_GRACE: Duration = Duration::from_millis(220);
 /// Slack around the island before the pointer counts as gone.
 const LEAVE_MARGIN: f64 = 12.0;
 const GEOMETRY_CHECK: Duration = Duration::from_secs(3);
+const FOCUS_CHECK: Duration = Duration::from_secs(2);
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -113,6 +115,8 @@ struct MenuIds {
 /// Tray menu items whose text or state follows the config.
 struct MenuItems {
     dnd: CheckMenuItem,
+    /// "Do Not Disturb is on", or why Focus can't be followed.
+    focus: MenuItem,
     api_info: MenuItem,
     copy_token: MenuItem,
 }
@@ -146,9 +150,47 @@ struct App {
     menu: MenuIds,
     prefs: Option<Prefs>,
     proxy: EventLoopProxy<UserEvent>,
+    focus: focus::Focus,
+    focus_checked: Instant,
 }
 
 impl App {
+    /// No peeks and no sounds: radio silence, or a macOS Focus.
+    fn quiet(&self) -> bool {
+        self.config.do_not_disturb || (self.config.follow_focus && self.focus.is_on())
+    }
+
+    fn check_focus(&mut self) -> bool {
+        let now = if self.config.follow_focus {
+            focus::read()
+        } else {
+            focus::Focus::Off
+        };
+        if now == self.focus {
+            return false;
+        }
+        log::line(&format!("focus: {}", now.describe()));
+        self.focus = now;
+        self.items.focus.set_text(self.focus_label());
+        if self.quiet() {
+            self.peek = None;
+        }
+        if let Some(p) = &self.prefs {
+            p.send(&self.prefs_state(false));
+        }
+        true
+    }
+
+    fn focus_label(&self) -> String {
+        if !self.config.follow_focus {
+            return "Not following macOS Focus".into();
+        }
+        match &self.focus {
+            focus::Focus::On(name) => format!("{name} is on: keeping quiet"),
+            other => other.describe(),
+        }
+    }
+
     fn mode(&self) -> Mode {
         if self.open_hover {
             Mode::Expanded
@@ -176,7 +218,11 @@ impl App {
                 .collect(),
             peek: self.peek.as_ref().map(|(id, _)| id.as_str()),
             notch: self.geometry.notch,
-            dnd: self.config.do_not_disturb,
+            dnd: self.quiet(),
+            focus: match &self.focus {
+                focus::Focus::On(name) if self.config.follow_focus => Some(name.as_str()),
+                _ => None,
+            },
             api: self.api_url.as_deref(),
             sources: self.registry.ids(),
             triggers: sources::DEMO_TRIGGERS,
@@ -228,9 +274,7 @@ impl App {
             SourceEvent::Upsert(island) => {
                 let severity = island.severity;
                 let id = store::id_of(&source, &island.key);
-                if self.store.upsert(*island, now_ms()) == Upsert::Peek
-                    && !self.config.do_not_disturb
-                {
+                if self.store.upsert(*island, now_ms()) == Upsert::Peek && !self.quiet() {
                     // A louder island takes over the peek; a quieter one waits its turn.
                     let current = self
                         .peek
@@ -377,6 +421,11 @@ impl App {
                     .collect(),
             },
             "profiles": aws::profiles(),
+            "focus": match &self.focus {
+                focus::Focus::On(name) => format!("{name} is on now"),
+                _ => String::new(),
+            },
+            "focus_unreadable": self.config.follow_focus && self.focus == focus::Focus::Unreadable,
             "statuses": self.statuses,
         })
     }
@@ -495,6 +544,11 @@ impl App {
                 };
                 self.reply(json!({"type": "token", "ok": ok, "text": text}));
             }
+            PrefsMessage::OpenFullDiskAccess => {
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                    .spawn();
+            }
             PrefsMessage::OpenConfigFolder => {
                 if let Some(dir) = Config::dir() {
                     let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
@@ -548,6 +602,8 @@ impl App {
         self.config = next;
         self.config.save()?;
         self.set_dnd(dnd);
+        self.check_focus();
+        self.items.focus.set_text(self.focus_label());
         self.restart_sources(&changed);
         Ok(changed.iter().map(|s| s.to_string()).collect())
     }
@@ -601,6 +657,10 @@ impl App {
                 }
             }
         }
+        if now.duration_since(self.focus_checked) >= FOCUS_CHECK {
+            self.focus_checked = now;
+            changed |= self.check_focus();
+        }
         if now.duration_since(self.geometry_checked) >= GEOMETRY_CHECK {
             self.geometry_checked = now;
             if let Some(g) = notch::detect(mtm)
@@ -614,7 +674,7 @@ impl App {
         if changed {
             self.render();
         }
-        let mut next = now + GEOMETRY_CHECK;
+        let mut next = now + GEOMETRY_CHECK.min(FOCUS_CHECK);
         if self.open_hover {
             next = next.min(now + HOVER_POLL);
         }
@@ -643,6 +703,12 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         config.do_not_disturb,
         None,
     );
+    let focus_text = if config.follow_focus {
+        "Following macOS Focus"
+    } else {
+        "Not following macOS Focus"
+    };
+    let focus_item = MenuItem::new(focus_text, false, None);
     let clear = MenuItem::new("Clear the board", true, None);
     let api_info = MenuItem::new(api_label(config), false, None);
     let copy_token = MenuItem::new("Copy API token", config.api.enabled, None);
@@ -652,6 +718,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         &demo,
         &PredefinedMenuItem::separator(),
         &dnd,
+        &focus_item,
         &clear,
         &PredefinedMenuItem::separator(),
         &api_info,
@@ -673,6 +740,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
     };
     let items = MenuItems {
         dnd,
+        focus: focus_item,
         api_info,
         copy_token,
     };
@@ -783,6 +851,8 @@ fn main() {
                 menu,
                 prefs: None,
                 proxy: proxy.clone(),
+                focus: focus::Focus::Off,
+                focus_checked: Instant::now() - FOCUS_CHECK,
             });
         }
         let Some(app) = app.as_mut() else { return };

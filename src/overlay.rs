@@ -74,6 +74,8 @@ pub struct OverlayState<'a> {
     pub peek: Option<&'a str>,
     pub notch: Notch,
     pub dnd: bool,
+    /// The macOS Focus keeping Houston quiet, if any.
+    pub focus: Option<&'a str>,
     pub api: Option<&'a str>,
     pub sources: Vec<&'a str>,
     pub triggers: &'a [(&'a str, &'a str)],
@@ -451,7 +453,7 @@ function expanded(h) {
   const critical = state.islands.filter((i) => i.severity === "critical").length;
   const left = n ? `<span class="count">${n}</span> active${critical ? ` · <span class="crit">${critical} critical</span>` : ""}` : "🛰️ Houston";
   const right = `${state.drills ? `<button data-trigger="tour" title="Run the full drill">▶</button>` : ""}
-    <button id="dnd" class="${state.dnd ? "on" : ""}" title="Do not disturb">${state.dnd ? "☾ DND" : "☾"}</button>
+    <button id="dnd" class="${state.dnd ? "on" : ""}" title="${state.focus ? `Quiet while ${esc(state.focus)} is on` : "Do not disturb"}">${state.focus ? `☾ ${esc(state.focus)}` : state.dnd ? "☾ DND" : "☾"}</button>
     ${n ? `<button id="clear">Clear</button>` : ""}`;
   const list = n ? state.islands.map((i) => card(i, true)).join("") :
     state.drills

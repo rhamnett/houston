@@ -239,6 +239,9 @@ pub struct Config {
     /// Show islands without expanding or sounds.
     #[serde(default)]
     pub do_not_disturb: bool,
+    /// Also go quiet while a macOS Focus (Do Not Disturb, Work…) is on.
+    #[serde(default = "yes")]
+    pub follow_focus: bool,
     #[serde(default = "yes")]
     pub sounds: bool,
     /// Path to the aws binary if it is not in the usual places.
@@ -265,6 +268,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             do_not_disturb: false,
+            follow_focus: true,
             sounds: true,
             aws_cli: None,
             api: ApiConfig::default(),
