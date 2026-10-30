@@ -77,6 +77,8 @@ pub struct OverlayState<'a> {
     pub api: Option<&'a str>,
     pub sources: Vec<&'a str>,
     pub triggers: &'a [(&'a str, &'a str)],
+    /// Show the drill (demo) controls in the expanded island.
+    pub drills: bool,
 }
 
 pub struct Overlay {
@@ -283,6 +285,8 @@ const PAGE: &str = r##"<!doctype html>
 
   .empty { text-align: center; padding: 14px 10px 8px; }
   .empty .big { font-size: 15px; font-weight: 600; }
+  .empty.quiet { padding: 10px 10px 2px; }
+  .empty.quiet .big { font-size: 13px; color: var(--muted); font-weight: 500; }
   .empty .sub { margin: 3px 0 12px; }
   .demo { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
   .demo button { font-size: 11px; padding: 5px 9px; }
@@ -446,13 +450,16 @@ function expanded(h) {
   const n = state.islands.length;
   const critical = state.islands.filter((i) => i.severity === "critical").length;
   const left = n ? `<span class="count">${n}</span> active${critical ? ` · <span class="crit">${critical} critical</span>` : ""}` : "🛰️ Houston";
-  const right = `<button data-trigger="tour" title="Run the full drill">▶</button>
+  const right = `${state.drills ? `<button data-trigger="tour" title="Run the full drill">▶</button>` : ""}
     <button id="dnd" class="${state.dnd ? "on" : ""}" title="Do not disturb">${state.dnd ? "☾ DND" : "☾"}</button>
     ${n ? `<button id="clear">Clear</button>` : ""}`;
   const list = n ? state.islands.map((i) => card(i, true)).join("") :
-    `<div class="empty"><div class="big">All systems nominal</div><div class="sub">Nothing needs you. Fancy a drill?</div>
-      <div class="demo">${state.triggers.map(([id, label]) => `<button class="${id === "tour" ? "tour" : ""}" data-trigger="${id}">${esc(label)}</button>`).join("")}</div></div>`;
-  const foot = `<div class="foot"><span>${state.api ? `API ${esc(state.api)}` : "API off"}</span><span>${state.sources.map(esc).join(" · ")}</span></div>`;
+    state.drills
+      ? `<div class="empty"><div class="big">All systems nominal</div><div class="sub">Nothing needs you. Fancy a drill?</div>
+          <div class="demo">${state.triggers.map(([id, label]) => `<button class="${id === "tour" ? "tour" : ""}" data-trigger="${id}">${esc(label)}</button>`).join("")}</div></div>`
+      : `<div class="empty quiet"><div class="big">All systems nominal</div></div>`;
+  const shown = state.sources.filter((s) => state.drills || s !== "demo");
+  const foot = `<div class="foot"><span>${state.api ? `API ${esc(state.api)}` : "API off"}</span><span>${shown.map(esc).join(" · ")}</span></div>`;
   return band(left, right, h) + `<div class="list">${list}</div>` + foot;
 }
 

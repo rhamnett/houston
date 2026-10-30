@@ -180,6 +180,7 @@ impl App {
             api: self.api_url.as_deref(),
             sources: self.registry.ids(),
             triggers: sources::DEMO_TRIGGERS,
+            drills: self.config.demo.autoplay,
         };
         let json = match serde_json::to_string(&state) {
             Ok(j) => j,

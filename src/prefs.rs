@@ -351,7 +351,7 @@ const VIEWS = {
     <div class="card">
       ${row("Sounds", toggle("sounds"), "Sosumi for critical, Tink for warnings.")}
       ${row("Radio silence", toggle("do_not_disturb"), "No peeks and no sounds. Islands still collect in the notch.")}
-      ${row("Drill on launch", toggle("demo.autoplay"), "Play the demo a second after Houston starts. Takes effect next launch.")}
+      ${row("Drills", toggle("demo.autoplay"), "Play the demo a second after Houston starts, and show drill buttons when you hover the notch. Off keeps the hover view to real notifications; drills stay in the menu.")}
       ${row("AWS CLI path", optText("aws_cli", "auto: /opt/homebrew/bin/aws"), "Only if <code>aws</code> lives somewhere unusual.")}
     </div>
     <div class="card">${row("Config folder", `<button data-act="open-folder">Open in Finder</button>`)}</div>
