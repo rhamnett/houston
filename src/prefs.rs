@@ -193,7 +193,8 @@ const PAGE: &str = r##"<!doctype html>
   .result { font-size: 12px; margin: 2px 0 8px; padding: 6px 9px; border-radius: 6px; background: var(--chip); }
   .result.ok { color: var(--ok); } .result.err { color: var(--danger); } .result.busy { color: var(--muted); }
   .secret { display: flex; gap: 8px; align-items: center; }
-  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--chip); color: var(--muted); }
+  .secret input { flex: 1; min-width: 0; }
+  .pill { display: inline-block; white-space: nowrap; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--chip); color: var(--muted); }
   .pill.ok { color: var(--ok); }
   .status { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--muted); white-space: pre-wrap; }
   footer { grid-column: 2; display: flex; gap: 10px; align-items: center; padding: 12px 28px;
@@ -202,16 +203,39 @@ const PAGE: &str = r##"<!doctype html>
   footer .msg.err { color: var(--danger); } footer .msg.ok { color: var(--ok); }
   .tryrule { display: flex; gap: 8px; margin: 12px 0 4px; }
   tr.hit td { background: rgba(10,132,255,.12); }
-  .cardhead { display: flex; align-items: center; gap: 8px; padding: 12px 0 8px; border-bottom: 1px solid var(--line); }
+  .cardhead { display: flex; align-items: center; gap: 8px; padding: 12px 0 10px; border-bottom: 1px solid var(--line); }
   .cardhead b { font-size: 14px; }
+  .cardhead .meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
   .grow { flex: 1; }
-  .disc { margin: 8px 0 12px; }
-  .disc .tools { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
-  .disc .scroll { max-height: 280px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
-  .disc th { position: sticky; top: 0; background: var(--panel); }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; }
+  .inline { display: flex; align-items: center; gap: 8px; }
+  .numbox input { width: 76px; }
+  .acct { padding: 0 16px 14px; }
+  .acct > .result { margin-top: 10px; }
+  .grid3 { display: grid; grid-template-columns: 1.1fr .7fr 1.2fr; gap: 10px 12px; margin-top: 12px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1.3fr; gap: 10px 12px; }
+  .fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .fld > span { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .fld small, small.note { color: var(--muted); font-size: 11px; line-height: 1.35; }
+  .creds, .disc, .summary { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .creds { display: flex; flex-direction: column; gap: 10px; }
+  .summary { color: var(--muted); font-size: 12px; }
+  .summary b { color: var(--fg); font-weight: 500; }
+  .seg { display: inline-flex; background: var(--chip); border-radius: 7px; padding: 2px; gap: 2px; align-self: flex-start; }
+  .seg button { border: 0; background: transparent; padding: 3px 10px; border-radius: 5px; font-size: 12px; }
+  .seg button.on { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+  .disc .tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .disc .tools input[type=text] { max-width: 220px; }
+  .disc .count { color: var(--muted); font-size: 12px; }
+  .disc .scroll { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; }
+  .disc th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
   .disc td { border-top: 1px solid var(--line); font-size: 12px; }
+  .disc tr:hover td { background: var(--chip); }
   .disc td.name { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; word-break: break-all; }
+  .disc td.cond { color: var(--muted); }
   .disc select { width: auto; padding: 2px 4px; font-size: 12px; }
+  .disc.all .watchcol { display: none; }
+  button.add { margin-bottom: 8px; }
   .st { font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 5px; background: var(--chip); }
   .st.ALARM { color: var(--danger); } .st.OK { color: var(--ok); } .st.INSUFFICIENT_DATA { color: #ff9f0a; }
   code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
@@ -290,28 +314,38 @@ function secretField(account, flag, placeholder) {
     ${state}${flag && edit === undefined ? `<button class="small danger" data-act="remove-secret" data-account="${account}">Remove</button>` : ""}</div>`;
 }
 
+// A segmented control; each button carries `attrs` and data-value.
+function seg(attrs, options, value) {
+  return `<div class="seg">${options.map(([v, l]) =>
+    `<button type="button" ${attrs} data-value="${v}" class="${v === value ? "on" : ""}">${l}</button>`).join("")}</div>`;
+}
+// A label stacked over its control.
+function fld(label, control, hint) {
+  return `<div class="fld"><span>${label}</span>${control}${hint ? `<small>${hint}</small>` : ""}</div>`;
+}
+
 // AWS credentials for an account or the SQS queue at `base`.
 function credsBlock(base) {
   const auth = get(base + ".auth") || { type: "profile" };
   const isKey = auth.type === "access_key";
-  const akid = isKey ? auth.access_key_id || "" : "";
+  const picker = seg(`data-act="auth" data-base="${base}"`, [["profile", "Profile or SSO"], ["access_key", "IAM access key"]], auth.type);
+  if (isKey) {
+    const akid = auth.access_key_id || "";
+    return `<div class="creds">${fld("Credentials", picker)}
+      <div class="grid2">
+        ${fld("Access key ID", `<input type="text" data-path="${base}.auth.access_key_id" data-kind="text" data-rerender value="${esc(akid)}" placeholder="AKIA…" autocomplete="off">`)}
+        ${fld("Secret access key", akid ? secretField("aws-secret:" + akid, secretFlags.aws?.[akid], "wJalrXUtnFEMI…") : `<span class="pill">enter the key ID first</span>`)}
+      </div>
+      <small class="note">The secret goes in the Keychain. A user that can only read alarms is best.</small></div>`;
+  }
   const prof = get(base + ".profile") || "";
   const known = profiles.find((p) => p.name === (prof || "default"));
-  const picker = `<select data-auth="${base}">
-      <option value="profile" ${isKey ? "" : "selected"}>CLI profile or SSO</option>
-      <option value="access_key" ${isKey ? "selected" : ""}>IAM access key</option></select>`;
-  if (isKey) {
-    return row("Credentials", picker) +
-      row("Access key ID", `<input type="text" data-path="${base}.auth.access_key_id" data-kind="text" data-rerender value="${esc(akid)}" placeholder="AKIA…" autocomplete="off">`) +
-      row("Secret access key", akid ? secretField("aws-secret:" + akid, secretFlags.aws?.[akid], "wJalrXUtnFEMI…") : `<span class="pill">enter the key ID first</span>`,
-        "Kept in the Keychain. Best as a user that can only read alarms (and the queue).");
-  }
-  const id = "sso:" + base;
-  return row("Credentials", picker) +
-    row("Profile", `<div class="secret"><input type="text" list="aws-profiles" data-path="${base}.profile" data-kind="opt" value="${esc(prof)}" placeholder="default">
-        <button class="small" data-act="sso" data-base="${base}">Sign in with SSO</button></div>${result(id)}`,
-      known ? `${known.sso ? "SSO profile" : "Profile"} from ~/.aws/config${known.region ? `, region ${esc(known.region)}` : ""}.`
-        : "Any profile in ~/.aws/config. Sign in with SSO runs <code>aws sso login --profile …</code> and opens your browser.");
+  const hint = known ? `${known.sso ? "SSO profile" : "Profile"} from ~/.aws/config${known.region ? ` · ${esc(known.region)}` : ""}`
+    : "Any profile in ~/.aws/config";
+  return `<div class="creds">${fld("Credentials", picker)}
+    ${fld("Profile", `<div class="inline"><input type="text" list="aws-profiles" data-path="${base}.profile" data-kind="opt" value="${esc(prof)}" placeholder="default">
+      <button class="small" data-act="sso" data-base="${base}" title="aws sso login --profile …">Sign in with SSO</button></div>`, hint)}
+    ${result("sso:" + base)}</div>`;
 }
 
 function secretFor(base) {
@@ -319,28 +353,72 @@ function secretFor(base) {
   return auth?.type === "access_key" ? secretEdits["aws-secret:" + auth.access_key_id] || null : null;
 }
 
-function discoverTable(i) {
+// ---- CloudWatch accounts -------------------------------------------------
+// Page-only state: whether an account shows its tick list, its filters, and
+// ticks put aside while "everything" is chosen.
+const onlyTicked = {}, discFilter = {}, stashed = {};
+
+const isOnly = (i) => onlyTicked[i] ?? (cfg.cloudwatch.accounts[i].include || []).length > 0;
+
+function accountName(a) {
+  return a.label || (a.auth?.type === "access_key" ? "Access key account" : a.profile) || "New account";
+}
+function accountMeta(i) {
+  const a = cfg.cloudwatch.accounts[i], n = (a.include || []).length;
+  const who = a.auth?.type === "access_key" ? "access key" : (a.profile || "default profile");
+  const what = n ? `${n} chosen alarm${n === 1 ? "" : "s"}` : a.alarm_prefix ? `alarms starting ${esc(a.alarm_prefix)}` : "every alarm";
+  return `${esc(who)} · ${esc(a.region || "no region")} · watching ${what}`;
+}
+function countText(i) {
+  const found = discovered["cw" + i] || [], n = (cfg.cloudwatch.accounts[i].include || []).length;
+  if (!isOnly(i)) return `${found.length} found · all watched`;
+  return n ? `${n} of ${found.length} ticked` : `none ticked yet, so all ${found.length} are watched`;
+}
+// Refresh the counts without re-rendering, so the list stays put.
+function refreshCounts(i) {
+  const c = $("count-" + i); if (c) c.textContent = countText(i);
+  const m = $("meta-" + i); if (m) m.innerHTML = accountMeta(i);
+}
+function applyFilter(i) {
+  const f = discFilter[i] || {}, q = (f.q || "").toLowerCase();
+  document.querySelectorAll(`.disc[data-i="${i}"] tbody tr`).forEach((tr) => {
+    tr.hidden = !(tr.dataset.name.includes(q) && (!f.state || tr.dataset.state === f.state));
+  });
+}
+
+function watchPanel(i) {
   const found = discovered["cw" + i];
-  if (!found) return "";
-  const acct = cfg.cloudwatch.accounts[i];
-  const include = acct.include || [];
+  if (!found) {
+    return `<div class="summary">Watching ${(cfg.cloudwatch.accounts[i].include || []).length ? "the alarms you chose" : "everything that matches the prefix"}.
+      <b>Discover alarms</b> to pick them and set severities.</div>`;
+  }
+  const include = cfg.cloudwatch.accounts[i].include || [];
+  const only = isOnly(i), f = discFilter[i] || {};
   const sevOf = (name) => (cfg.alarm_rules.find((r) => r.pattern === name) || {}).severity || "";
-  return `<div class="disc">
-    <div class="tools"><input type="text" data-filter="${i}" placeholder="Filter ${found.length} alarms">
-      <button class="small" data-act="watch-shown" data-i="${i}">Tick shown</button>
-      <button class="small" data-act="watch-all" data-i="${i}">Watch everything</button></div>
-    <div class="hint" style="margin:0 0 6px">${include.length ? `Watching <b>${include.length}</b> ticked alarm(s).`
-      : "Nothing ticked, so every alarm matching the prefix is watched. Tick some to watch only those."}
-      Severity saves an exact-name alarm rule.</div>
-    <div class="scroll"><table><thead><tr><th>Watch</th><th>Alarm</th><th>Now</th><th>Condition</th><th>Severity</th></tr></thead><tbody>
-    ${found.map((a) => `<tr data-name="${esc(a.name.toLowerCase())}">
-      <td class="narrow"><input type="checkbox" data-act="watch" data-i="${i}" data-name="${esc(a.name)}" ${include.includes(a.name) ? "checked" : ""}></td>
+  const inAlarm = found.filter((a) => a.state === "ALARM").length;
+  return `<div class="disc ${only ? "" : "all"}" data-i="${i}">
+    <div class="tools">
+      ${seg(`data-act="watchmode" data-i="${i}"`, [["all", "Everything matching"], ["only", "Only ticked"]], only ? "only" : "all")}
+      <span class="grow"></span><span class="count" id="count-${i}">${countText(i)}</span>
+    </div>
+    <div class="tools">
+      <input type="text" data-filter="${i}" value="${esc(f.q || "")}" placeholder="Filter by name">
+      ${seg(`data-act="statefilter" data-i="${i}"`, [["", "All"], ["ALARM", `In alarm${inAlarm ? ` (${inAlarm})` : ""}`], ["OK", "OK"], ["INSUFFICIENT_DATA", "No data"]], f.state || "")}
+      <span class="grow"></span>
+      ${only ? `<button class="small" data-act="tick-shown" data-i="${i}">Tick shown</button>
+        <button class="small" data-act="untick-all" data-i="${i}">Untick all</button>` : ""}
+    </div>
+    <div class="scroll" data-scroll="disc-${i}"><table><thead><tr>
+      <th class="watchcol"></th><th>Alarm</th><th>Now</th><th>Condition</th><th>Severity</th></tr></thead><tbody>
+    ${found.map((a) => `<tr data-name="${esc(a.name.toLowerCase())}" data-state="${esc(a.state)}">
+      <td class="watchcol narrow"><input type="checkbox" data-act="watch" data-i="${i}" data-name="${esc(a.name)}" ${include.includes(a.name) ? "checked" : ""}></td>
       <td class="name" title="${esc(a.description || "")}">${esc(a.name)}</td>
       <td class="narrow"><span class="st ${esc(a.state)}">${esc(a.state === "INSUFFICIENT_DATA" ? "NO DATA" : a.state)}</span></td>
-      <td>${esc(a.metric || "")}</td>
+      <td class="cond">${esc(a.metric || "")}</td>
       <td class="narrow"><select data-sev="${esc(a.name)}">${["", "critical", "warning", "info"].map((v) =>
         `<option value="${v}" ${sevOf(a.name) === v ? "selected" : ""}>${v || "default"}</option>`).join("")}</select></td></tr>`).join("")}
-    </tbody></table></div></div>`;
+    </tbody></table></div>
+    <small class="note">Severity saves an exact-name alarm rule, placed first so it wins.</small></div>`;
 }
 
 // ---- sections -------------------------------------------------------------
@@ -359,28 +437,33 @@ const VIEWS = {
 
   cloudwatch: () => `
     <h1>CloudWatch</h1>
-    <p class="lede">Poll <code>describe-alarms</code> for each profile and region. Uses your AWS CLI profiles, so SSO works; needs only <code>cloudwatch:DescribeAlarms</code>.</p>
-    <div class="card">
-      ${row("Enabled", toggle("cloudwatch.enabled"))}
-      ${row("Poll every (s)", num("cloudwatch.interval_secs", 15, 3600), "15 s minimum.")}
+    <p class="lede">Polls <code>describe-alarms</code> for each account. Needs only <code>cloudwatch:DescribeAlarms</code>.</p>
+    <div class="card bar">
+      <label class="inline">${toggle("cloudwatch.enabled")} <span>Enabled</span></label>
+      <span class="grow"></span>
+      <label class="inline"><span>Poll every</span><span class="numbox">${num("cloudwatch.interval_secs", 15, 3600)}</span><span>seconds</span></label>
     </div>
     ${(cfg.cloudwatch.accounts || []).map((a, i) => {
       const base = `cloudwatch.accounts.${i}`;
-      const name = a.label || (a.auth?.type === "access_key" ? "Access key account" : a.profile) || "New account";
-      const watching = (a.include || []).length ? `${a.include.length} alarm(s)` : (a.alarm_prefix ? `${esc(a.alarm_prefix)}*` : "all alarms");
-      return `<div class="card">
-        <div class="cardhead"><b>${esc(name)}</b><span class="pill">${watching}</span><span class="grow"></span>
+      return `<section class="card acct">
+        <header class="cardhead">
+          <div class="who"><b>${esc(accountName(a))}</b><div class="meta" id="meta-${i}">${accountMeta(i)}</div></div>
+          <span class="grow"></span>
           <button class="small" data-act="test-cw" data-i="${i}">Test</button>
-          <button class="small" data-act="discover" data-i="${i}">Discover alarms</button>
-          <button class="small danger" data-act="del" data-list="cloudwatch.accounts" data-i="${i}">Remove</button></div>
+          <button class="small" data-act="discover" data-i="${i}">${discovered["cw" + i] ? "Rescan" : "Discover alarms"}</button>
+          <button class="small danger" data-act="del" data-list="cloudwatch.accounts" data-i="${i}" title="Remove this account">Remove</button>
+        </header>
         ${result("cw" + i)}
-        ${row("Label", optText(`${base}.label`, "shown on cards, e.g. apollo prod"))}
-        ${row("Region", optText(`${base}.region`, "eu-west-2"))}
-        ${row("Alarm prefix", optText(`${base}.alarm_prefix`, "apollo-prod-"), "Only alarms whose names start with this. Discover alarms uses it too.")}
+        <div class="grid3">
+          ${fld("Label", optText(`${base}.label`, "e.g. apollo prod"))}
+          ${fld("Region", optText(`${base}.region`, "eu-west-2"))}
+          ${fld("Alarm prefix", optText(`${base}.alarm_prefix`, "e.g. apollo-prod-"))}
+        </div>
         ${credsBlock(base)}
-        ${discoverTable(i)}</div>`;
+        ${watchPanel(i)}
+      </section>`;
     }).join("")}
-    <p><button data-act="add-account">+ Add account</button></p>`,
+    <button class="add" data-act="add-account">+ Add an account</button>`,
 
   sqs: () => `
     <h1>SQS</h1>
@@ -457,15 +540,38 @@ const VIEWS = {
     </div>`,
 };
 
-function render() {
+// Re-draw the page, keeping scroll positions, filters and the focused field,
+// so editing never makes the page jump. `fresh` starts at the top (new tab).
+function render(fresh = false) {
+  const main = $("main");
+  const keep = { top: main.scrollTop, scrolls: {} };
+  main.querySelectorAll("[data-scroll]").forEach((el) => { keep.scrolls[el.dataset.scroll] = el.scrollTop; });
+  const a = document.activeElement;
+  if (a && main.contains(a)) {
+    for (const k of ["path", "filter", "secret"]) {
+      if (a.dataset[k] !== undefined) {
+        keep.focus = { sel: `[data-${k}="${CSS.escape(a.dataset[k])}"]`, start: a.selectionStart, end: a.selectionEnd };
+        break;
+      }
+    }
+  }
   $("nav").innerHTML = `<div class="brand">🛰️ Houston</div><div class="tag">we have a notch</div>` +
     SECTIONS.map(([id, label]) => {
       const live = { cloudwatch: cfg.cloudwatch.enabled, sqs: cfg.sqs.enabled, linear: cfg.linear.enabled,
         iot: cfg.iot.enabled, api: cfg.api.enabled }[id];
       return `<a data-tab="${id}" class="${tab === id ? "on" : ""}">${label}${live === undefined ? "" : `<span class="dot ${live ? "live" : ""}"></span>`}</a>`;
     }).join("");
-  $("main").innerHTML = VIEWS[tab]() +
+  main.innerHTML = VIEWS[tab]() +
     `<datalist id="aws-profiles">${profiles.map((p) => `<option value="${esc(p.name)}">${p.sso ? "SSO" : ""}</option>`).join("")}</datalist>`;
+  Object.keys(discFilter).forEach(applyFilter);
+  if (fresh) return;
+  main.scrollTop = keep.top;
+  main.querySelectorAll("[data-scroll]").forEach((el) => { el.scrollTop = keep.scrolls[el.dataset.scroll] || 0; });
+  const f = keep.focus && main.querySelector(keep.focus.sel);
+  if (f) {
+    f.focus({ preventScroll: true });
+    try { f.setSelectionRange(keep.focus.start, keep.focus.end); } catch (_) { /* not a text field */ }
+  }
 }
 
 // ---- events -----------------------------------------------------------------
@@ -486,10 +592,6 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", (e) => {
   const el = e.target;
-  if (el.dataset.auth) {
-    set(el.dataset.auth + ".auth", el.value === "access_key" ? { type: "access_key", access_key_id: "" } : { type: "profile" });
-    render(); return;
-  }
   if (el.dataset.sev !== undefined) {
     const name = el.dataset.sev, at = cfg.alarm_rules.findIndex((r) => r.pattern === name);
     if (!el.value) { if (at >= 0) cfg.alarm_rules.splice(at, 1); }
@@ -503,13 +605,13 @@ document.addEventListener("change", (e) => {
 });
 document.addEventListener("input", (e) => {
   const i = e.target.dataset.filter; if (i === undefined) return;
-  const q = e.target.value.trim().toLowerCase();
-  e.target.closest(".disc").querySelectorAll("tbody tr").forEach((tr) => { tr.style.display = tr.dataset.name.includes(q) ? "" : "none"; });
+  (discFilter[i] ??= {}).q = e.target.value.trim();
+  applyFilter(i);
 });
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab]");
-  if (t) { tab = t.dataset.tab; ruleHit = null; render(); return; }
+  if (t) { tab = t.dataset.tab; ruleHit = null; render(true); return; }
   const b = e.target.closest("[data-act]"); if (!b) return;
   const i = Number(b.dataset.i);
   switch (b.dataset.act) {
@@ -519,14 +621,32 @@ document.addEventListener("click", (e) => {
       post({ type: "sso_login", id, profile: get(base + ".profile") || "default", aws_cli: cfg.aws_cli }); break; }
     case "discover": results["cw" + i] = { cls: "busy", text: "Scanning for alarms…" }; render();
       post({ type: "discover_alarms", id: "cw" + i, account: cfg.cloudwatch.accounts[i], aws_cli: cfg.aws_cli, secret: secretFor(`cloudwatch.accounts.${i}`) }); break;
+    case "auth": {
+      const base = b.dataset.base, now = get(base + ".auth")?.type || "profile";
+      if (b.dataset.value !== now) {
+        set(base + ".auth", b.dataset.value === "access_key" ? { type: "access_key", access_key_id: "" } : { type: "profile" });
+        render();
+      }
+      break; }
+    // Ticks change the data and the counts in place; no re-render, no jump.
     case "watch": { const inc = (cfg.cloudwatch.accounts[i].include ??= []), n = b.dataset.name;
       const at = inc.indexOf(n); if (b.checked && at < 0) inc.push(n); if (!b.checked && at >= 0) inc.splice(at, 1);
-      dirty(); render(); break; }
-    case "watch-shown": { const inc = (cfg.cloudwatch.accounts[i].include ??= []);
-      b.closest(".disc").querySelectorAll("tbody tr").forEach((tr) => { if (tr.style.display !== "none") {
-        const n = tr.querySelector("[data-name]").dataset.name; if (!inc.includes(n)) inc.push(n); } });
-      dirty(); render(); break; }
-    case "watch-all": cfg.cloudwatch.accounts[i].include = []; dirty(); render(); break;
+      dirty(); refreshCounts(i); break; }
+    case "tick-shown": { const inc = (cfg.cloudwatch.accounts[i].include ??= []);
+      b.closest(".disc").querySelectorAll("tbody tr:not([hidden]) input[data-act=watch]").forEach((box) => {
+        box.checked = true; if (!inc.includes(box.dataset.name)) inc.push(box.dataset.name); });
+      dirty(); refreshCounts(i); break; }
+    case "untick-all":
+      cfg.cloudwatch.accounts[i].include = [];
+      b.closest(".disc").querySelectorAll("input[data-act=watch]").forEach((box) => { box.checked = false; });
+      dirty(); refreshCounts(i); break;
+    case "watchmode": {
+      const acct = cfg.cloudwatch.accounts[i], only = b.dataset.value === "only";
+      if (only === isOnly(i)) break;
+      if (only) { acct.include = stashed[i] || acct.include || []; delete stashed[i]; }
+      else { if ((acct.include || []).length) stashed[i] = acct.include; acct.include = []; }
+      onlyTicked[i] = only; dirty(); render(); break; }
+    case "statefilter": (discFilter[i] ??= {}).state = b.dataset.value; render(); break;
     case "add-rule": cfg.alarm_rules.push({ pattern: "", severity: null, sticky: null, silent: false, mute: false, runbook_url: null }); dirty(); render(); break;
     case "del": get(b.dataset.list).splice(i, 1); dirty(); render(); break;
     case "up": if (i > 0) { const r = cfg.alarm_rules; [r[i - 1], r[i]] = [r[i], r[i - 1]]; dirty(); render(); } break;
