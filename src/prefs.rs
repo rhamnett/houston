@@ -231,8 +231,14 @@ const PAGE: &str = r##"<!doctype html>
   .disc th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
   .disc td { border-top: 1px solid var(--line); font-size: 12px; }
   .disc tr:hover td { background: var(--chip); }
-  .disc td.name { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; word-break: break-all; }
-  .disc td.cond { color: var(--muted); }
+  /* Fixed columns: long CDK alarm names get the room, the rest stay narrow. */
+  .disc table { table-layout: fixed; }
+  .disc col.w { width: 30px; } .disc col.now { width: 78px; } .disc col.cond { width: 30%; } .disc col.sev { width: 96px; }
+  .disc.all col.w { width: 0; }
+  .disc td.name { font-size: 12px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+  .disc td.cond { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .disc td.narrow { width: auto; }
+  .disc select { max-width: 100%; }
   .disc select { width: auto; padding: 2px 4px; font-size: 12px; }
   .disc.all .watchcol { display: none; }
   button.add { margin-bottom: 8px; }
@@ -408,13 +414,14 @@ function watchPanel(i) {
       ${only ? `<button class="small" data-act="tick-shown" data-i="${i}">Tick shown</button>
         <button class="small" data-act="untick-all" data-i="${i}">Untick all</button>` : ""}
     </div>
-    <div class="scroll" data-scroll="disc-${i}"><table><thead><tr>
+    <div class="scroll" data-scroll="disc-${i}"><table>
+      <colgroup><col class="w"><col><col class="now"><col class="cond"><col class="sev"></colgroup><thead><tr>
       <th class="watchcol"></th><th>Alarm</th><th>Now</th><th>Condition</th><th>Severity</th></tr></thead><tbody>
     ${found.map((a) => `<tr data-name="${esc(a.name.toLowerCase())}" data-state="${esc(a.state)}">
       <td class="watchcol narrow"><input type="checkbox" data-act="watch" data-i="${i}" data-name="${esc(a.name)}" ${include.includes(a.name) ? "checked" : ""}></td>
-      <td class="name" title="${esc(a.description || "")}">${esc(a.name)}</td>
+      <td class="name" title="${esc(a.description || a.name)}">${esc(a.name).replace(/-/g, "-<wbr>")}</td>
       <td class="narrow"><span class="st ${esc(a.state)}">${esc(a.state === "INSUFFICIENT_DATA" ? "NO DATA" : a.state)}</span></td>
-      <td class="cond">${esc(a.metric || "")}</td>
+      <td class="cond" title="${esc(a.metric || "")}">${esc(a.metric || "")}</td>
       <td class="narrow"><select data-sev="${esc(a.name)}">${["", "critical", "warning", "info"].map((v) =>
         `<option value="${v}" ${sevOf(a.name) === v ? "selected" : ""}>${v || "default"}</option>`).join("")}</select></td></tr>`).join("")}
     </tbody></table></div>
