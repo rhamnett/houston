@@ -433,7 +433,7 @@ const VIEWS = {
       ${row("Radio silence", toggle("do_not_disturb"), "No peeks and no sounds. Islands still collect in the notch.")}
       ${row("Follow macOS Focus", toggle("follow_focus"), `Go quiet while Do Not Disturb or any Focus is on. ${focusNow ? `<b>${esc(focusNow)}.</b>` : ""}
         ${focusUnreadable ? `<br><button class="small" data-act="fda">Open Full Disk Access</button> then add Houston (or your terminal, for <code>cargo run</code>) and restart it.` : "Focus modes started by a schedule aren't seen, only ones switched on by hand or by a Shortcut."}`)}
-      ${row("Drills", toggle("demo.autoplay"), "Play the demo a second after Houston starts, and show drill buttons when you hover the notch. Off keeps the hover view to real notifications; drills stay in the menu.")}
+      ${row("Drills", toggle("demo.autoplay"), "Play the demo a second after Houston starts, and offer drills when you hover the notch and in the menu bar menu. Off hides them everywhere.")}
       ${row("AWS CLI path", optText("aws_cli", "auto: /opt/homebrew/bin/aws"), "Only if <code>aws</code> lives somewhere unusual.")}
     </div>
     <div class="card">${row("Config folder", `<button data-act="open-folder">Open in Finder</button>`)}</div>

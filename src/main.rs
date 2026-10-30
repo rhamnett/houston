@@ -114,6 +114,11 @@ struct MenuIds {
 
 /// Tray menu items whose text or state follows the config.
 struct MenuItems {
+    /// The tray menu itself (a handle: clones share it).
+    menu: Menu,
+    /// "Run a drill" and the separator under it; shown only with drills on.
+    drills: (Submenu, PredefinedMenuItem),
+    drills_shown: bool,
     dnd: CheckMenuItem,
     /// "Do Not Disturb is on", or why Focus can't be followed.
     focus: MenuItem,
@@ -362,6 +367,27 @@ impl App {
         }
     }
 
+    /// Show "Run a drill" in the tray menu only while drills are on.
+    fn sync_drills_menu(&mut self) {
+        let want = self.config.demo.autoplay;
+        if want == self.items.drills_shown {
+            return;
+        }
+        let (submenu, sep) = &self.items.drills;
+        let result = if want {
+            self.items.menu.insert_items(&[submenu, sep], 0)
+        } else {
+            self.items
+                .menu
+                .remove(submenu)
+                .and_then(|_| self.items.menu.remove(sep))
+        };
+        match result {
+            Ok(()) => self.items.drills_shown = want,
+            Err(e) => log::line(&format!("menu: {e}")),
+        }
+    }
+
     fn set_dnd(&mut self, on: bool) {
         self.config.do_not_disturb = on;
         self.items.dnd.set_checked(on);
@@ -595,6 +621,7 @@ impl App {
         self.config = next;
         self.config.save()?;
         self.set_dnd(dnd);
+        self.sync_drills_menu();
         self.check_focus();
         self.items.focus.set_text(self.focus_label());
         self.restart_sources(&changed);
@@ -707,9 +734,8 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
     let copy_token = MenuItem::new("Copy API token", config.api.enabled, None);
     let open_config = MenuItem::new("Open config folder", true, None);
     let prefs = MenuItem::new("Mission settings…", true, None);
+    let drills_sep = PredefinedMenuItem::separator();
     let menu = Menu::with_items(&[
-        &demo,
-        &PredefinedMenuItem::separator(),
         &dnd,
         &focus_item,
         &clear,
@@ -731,7 +757,13 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         config: open_config.id().clone(),
         prefs: prefs.id().clone(),
     };
+    if config.demo.autoplay {
+        let _ = menu.insert_items(&[&demo, &drills_sep], 0);
+    }
     let items = MenuItems {
+        menu: menu.clone(),
+        drills: (demo, drills_sep),
+        drills_shown: config.demo.autoplay,
         dnd,
         focus: focus_item,
         api_info,

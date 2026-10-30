@@ -141,9 +141,11 @@ buttons), `sticky` (stays until dismissed), `ttl_secs` (default 15),
 
 ## Drills (the demo)
 
-The full drill plays a second after launch (turn it off with `demo.autoplay`).
-Replay it from **Run a drill** in the menu, or from the empty expanded island.
-In order:
+With **Drills** on (Mission settings > General, or `demo.autoplay`), the
+full drill plays a second after launch. You can replay it from **Run a drill**
+in the menu bar menu, or from the empty expanded island. With Drills off,
+both go away and the hover view only shows real notifications. The drill
+runs in this order:
 
 1. A CloudWatch alarm, built through the same mapper the real sources use.
    **Acknowledge** is a round trip back to the source.
