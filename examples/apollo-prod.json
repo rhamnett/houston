@@ -1,0 +1,44 @@
+{
+  "cloudwatch": {
+    "enabled": false,
+    "interval_secs": 60,
+    "accounts": [
+      { "profile": "apollo-prod", "region": "eu-west-2", "label": "apollo prod", "alarm_prefix": "apollo-prod-" }
+    ]
+  },
+  "sqs": {
+    "enabled": false,
+    "queue_url": "https://sqs.eu-west-2.amazonaws.com/APOLLO_PROD_ACCOUNT/apollo-prod-notch",
+    "profile": "apollo-prod",
+    "region": "eu-west-2",
+    "wait_secs": 20
+  },
+  "iot": {
+    "enabled": false,
+    "endpoint": "from SSM /apollo/prod/iot/data-endpoint",
+    "profile": "apollo-prod",
+    "region": "eu-west-2",
+    "topics": ["apollo/prod/t/+/call/+/events"]
+  },
+  "alarm_rules": [
+    { "pattern": "apollo-prod-concurrent-calls-capacity", "severity": "critical" },
+    { "pattern": "apollo-prod-*-unavailable", "severity": "critical" },
+    { "pattern": "apollo-prod-*-saturated", "severity": "critical" },
+    { "pattern": "apollo-prod-*-heartbeat-*", "severity": "critical" },
+    { "pattern": "apollo-prod-*canary*", "severity": "critical" },
+    { "pattern": "apollo-prod-routing-command-*-not-empty", "severity": "critical" },
+    { "pattern": "apollo-prod-livekit-status-check-failed", "severity": "critical" },
+    { "pattern": "apollo-prod-native-*relay*", "severity": "critical" },
+
+    { "pattern": "apollo-prod-*-fallback", "severity": "warning" },
+    { "pattern": "apollo-prod-*-errors", "severity": "warning" },
+    { "pattern": "apollo-prod-*-latency-*", "severity": "warning" },
+    { "pattern": "apollo-prod-eks-*", "severity": "warning" },
+    { "pattern": "apollo-prod-*-not-empty", "severity": "warning" },
+
+    { "pattern": "apollo-prod-billing-*", "severity": "info", "silent": true },
+    { "pattern": "apollo-prod-recording-*", "severity": "info", "silent": true },
+    { "pattern": "apollo-prod-retention-*", "severity": "info", "silent": true },
+    { "pattern": "*langfuse*", "severity": "info", "silent": true }
+  ]
+}
