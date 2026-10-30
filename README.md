@@ -181,9 +181,9 @@ Built in:
 | `linear`     | your Linear issues, and urgent ones in the teams you watch         | off     |
 | `iot`        | **stub**: AWS IoT Core MQTT subscriber (live call events)          | off     |
 
-The AWS sources shell out to the `aws` CLI, so SSO profiles and credential
-processes work unchanged. When an SSO session expires, an island tells you to
-run `aws sso login --profile …`. `src/aws.rs` maps three payload shapes to the
+The AWS sources shell out to the `aws` CLI, signed with an IAM access key
+from the Keychain or a CLI profile. When credentials stop working, a "Lost
+signal" island says why. `src/aws.rs` maps three payload shapes to the
 same alarm island: `describe-alarms` rows, EventBridge
 `CloudWatch Alarm State Change` events, and SNS alarm notifications (raw or in
 an SNS envelope). It also maps Security Hub findings (`Security Hub Findings -
@@ -226,16 +226,15 @@ In `~/Library/Application Support/houston/config.json`:
 Each account signs its calls in one of two ways, set under **Credentials**
 in Mission settings:
 
-- **CLI profile or SSO**: any profile in `~/.aws/config`, offered as you
-  type. **Sign in with SSO** runs `aws sso login --profile …` and opens your
-  browser, exactly as on the command line. When a session expires, the
-  "Lost signal" island has a **Sign in** button that does the same and polls
-  again once you've approved it.
-- **IAM access key**: a long-lived key for a read-only user. The key ID goes
-  in the config file and the secret key goes in the Keychain (as
-  `aws-secret:<key id>`). Both reach the AWS CLI through environment
-  variables, never as command-line arguments. Removing the account removes
-  its secret too.
+- **IAM access key** (the default, and recommended): a long-lived key for a
+  read-only user. The key ID goes in the config file and the secret key goes
+  in the Keychain (as `aws-secret:<key id>`). Both reach the AWS CLI through
+  environment variables, never as command-line arguments. Removing the
+  account removes its secret too.
+- **CLI profile**: any profile in `~/.aws/config`, offered as you type, with
+  keys in `~/.aws/credentials` or a `credential_process`. SSO profiles work,
+  but their sessions expire within hours and polling stops until you run
+  `aws sso login` again, so Mission settings warns when you pick one.
 
 ```json
 { "auth": { "type": "access_key", "access_key_id": "AKIA…" }, "region": "eu-west-2", "label": "voip" }
@@ -343,8 +342,8 @@ into one timer island per call, which goes away on `call.ended`:
 `examples/apollo-prod.json` has every Apollo route set up but turned off, and
 a first draft of `alarm_rules`. Copy the parts you want into your config.
 
-- **Polling** works as soon as `cloudwatch.enabled` is true and
-  `aws sso login --profile apollo-prod` has been run.
+- **Polling** works as soon as `cloudwatch.enabled` is true and the account
+  has an IAM access key (or a working CLI profile).
 - **SQS** needs a queue that doesn't exist yet. In sip, subscribe one to the
   `apollo-prod-alarms` topic (and `security-incidents` for findings) next to
   `AlarmSlackNotifyConstruct`, with `rawMessageDelivery` off.

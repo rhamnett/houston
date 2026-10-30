@@ -1,4 +1,4 @@
-//! Everything that knows about AWS: running the `aws` CLI (so SSO profiles and
+//! Everything that knows about AWS: running the `aws` CLI (so CLI profiles and
 //! credential processes just work) and turning CloudWatch alarm payloads into
 //! islands. Three payload shapes are understood:
 //!
@@ -556,8 +556,8 @@ fn find_cli() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("aws"))
 }
 
-/// Who an AWS call runs as. Built fresh for each call, so a rotated key or a
-/// new SSO session is picked up without a restart.
+/// Who an AWS call runs as. Built fresh for each call, so a rotated key is
+/// picked up without a restart.
 #[derive(Clone, Default)]
 pub struct Creds {
     pub profile: Option<String>,
@@ -647,14 +647,6 @@ pub fn cli(binary: Option<&str>, args: &[&str], creds: &Creds) -> Result<String,
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
 }
 
-/// `aws sso login --profile …`: opens the browser and returns once the user
-/// has approved it (or given up).
-pub fn sso_login(binary: Option<&str>, profile: &str) -> Result<String, String> {
-    let creds = Creds::default();
-    cli(binary, &["sso", "login", "--profile", profile], &creds)?;
-    Ok(format!("Signed in to {profile}."))
-}
-
 fn display(p: &Path) -> String {
     p.display().to_string()
 }
@@ -663,6 +655,7 @@ fn display(p: &Path) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Profile {
     pub name: String,
+    /// Uses SSO, whose sessions expire within hours: worth a warning.
     pub sso: bool,
     pub region: Option<String>,
 }

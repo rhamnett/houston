@@ -48,13 +48,6 @@ pub enum PrefsMessage {
         #[serde(default)]
         secret: Option<String>,
     },
-    /// `aws sso login --profile …` in the browser.
-    SsoLogin {
-        id: String,
-        profile: String,
-        #[serde(default)]
-        aws_cli: Option<String>,
-    },
     TestLinear {
         id: String,
         linear: LinearConfig,
@@ -218,6 +211,7 @@ const PAGE: &str = r##"<!doctype html>
   .grid2 { display: grid; grid-template-columns: 1fr 1.3fr; gap: 10px 12px; }
   .fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .fld > span { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .warn { color: #ff9f0a; }
   .fld small, small.note { color: var(--muted); font-size: 11px; line-height: 1.35; }
   .creds, .disc, .summary { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
   .creds { display: flex; flex-direction: column; gap: 10px; }
@@ -335,7 +329,7 @@ function fld(label, control, hint) {
 function credsBlock(base) {
   const auth = get(base + ".auth") || { type: "profile" };
   const isKey = auth.type === "access_key";
-  const picker = seg(`data-act="auth" data-base="${base}"`, [["profile", "Profile or SSO"], ["access_key", "IAM access key"]], auth.type);
+  const picker = seg(`data-act="auth" data-base="${base}"`, [["access_key", "IAM access key"], ["profile", "CLI profile"]], auth.type);
   if (isKey) {
     const akid = auth.access_key_id || "";
     return `<div class="creds">${fld("Credentials", picker)}
@@ -347,12 +341,12 @@ function credsBlock(base) {
   }
   const prof = get(base + ".profile") || "";
   const known = profiles.find((p) => p.name === (prof || "default"));
-  const hint = known ? `${known.sso ? "SSO profile" : "Profile"} from ~/.aws/config${known.region ? ` · ${esc(known.region)}` : ""}`
-    : "Any profile in ~/.aws/config";
+  const hint = known?.sso
+    ? `<span class="warn">⚠️ ${esc(known.name)} is an SSO profile. Its session expires within hours and alarms stop until you sign in again. An IAM access key doesn't expire.</span>`
+    : known ? `Profile from ~/.aws/config${known.region ? ` · ${esc(known.region)}` : ""}`
+    : "A profile with keys in ~/.aws/credentials or a credential_process";
   return `<div class="creds">${fld("Credentials", picker)}
-    ${fld("Profile", `<div class="inline"><input type="text" list="aws-profiles" data-path="${base}.profile" data-kind="opt" value="${esc(prof)}" placeholder="default">
-      <button class="small" data-act="sso" data-base="${base}" title="aws sso login --profile …">Sign in with SSO</button></div>`, hint)}
-    ${result("sso:" + base)}</div>`;
+    ${fld("Profile", `<input type="text" list="aws-profiles" data-path="${base}.profile" data-kind="opt" data-rerender value="${esc(prof)}" placeholder="default">`, hint)}</div>`;
 }
 
 function secretFor(base) {
@@ -625,10 +619,7 @@ document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]"); if (!b) return;
   const i = Number(b.dataset.i);
   switch (b.dataset.act) {
-    case "add-account": cfg.cloudwatch.accounts.push({ auth: { type: "profile" }, profile: null, region: "eu-west-2", label: null, alarm_prefix: null, include: [] }); dirty(); render(); break;
-    case "sso": { const base = b.dataset.base, id = "sso:" + base;
-      results[id] = { cls: "busy", text: "Opening your browser. Approve the sign-in there…" }; render();
-      post({ type: "sso_login", id, profile: get(base + ".profile") || "default", aws_cli: cfg.aws_cli }); break; }
+    case "add-account": cfg.cloudwatch.accounts.push({ auth: { type: "access_key", access_key_id: "" }, profile: null, region: "eu-west-2", label: null, alarm_prefix: null, include: [] }); dirty(); render(); break;
     case "discover": results["cw" + i] = { cls: "busy", text: "Scanning for alarms…" }; render();
       post({ type: "discover_alarms", id: "cw" + i, account: cfg.cloudwatch.accounts[i], aws_cli: cfg.aws_cli, secret: secretFor(`cloudwatch.accounts.${i}`) }); break;
     case "auth": {

@@ -74,8 +74,8 @@ impl Default for DemoConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AwsAuth {
-    /// A CLI profile: SSO (`aws sso login --profile …`), a credential process,
-    /// or keys in ~/.aws/credentials.
+    /// A CLI profile: keys in ~/.aws/credentials or a credential process. SSO
+    /// profiles work too, but their sessions expire within hours.
     #[default]
     Profile,
     /// A long-lived IAM access key. The secret half is in the Keychain under

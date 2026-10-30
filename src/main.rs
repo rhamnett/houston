@@ -497,13 +497,6 @@ impl App {
                     let _ = proxy.send_event(UserEvent::PrefsReply(reply));
                 });
             }
-            PrefsMessage::SsoLogin {
-                id,
-                profile,
-                aws_cli,
-            } => {
-                self.in_background(id, move || aws::sso_login(aws_cli.as_deref(), &profile));
-            }
             PrefsMessage::TestLinear {
                 id,
                 mut linear,

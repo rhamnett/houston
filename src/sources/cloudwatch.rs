@@ -1,23 +1,19 @@
 //! Polls `aws cloudwatch describe-alarms --state-value ALARM` for each
 //! configured profile and region. New alarms appear as critical islands; an
 //! alarm that drops out of ALARM gets a short "OK" island. Uses the AWS CLI, so
-//! SSO profiles work; when a session expires, the warning island has a
-//! **Sign in** button that runs `aws sso login`. Accounts can use an IAM access
-//! key from the Keychain instead.
+//! a CLI profile works; the recommended way is an IAM access key whose secret
+//! is in the Keychain, since SSO sessions expire within hours.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::aws::{self, AlarmState, Creds, Discovered};
 use crate::config::{AlarmRule, AwsAccount, AwsAuth, CloudWatchConfig};
-use crate::island::{Action, Island, Kind, Severity};
+use crate::island::{Island, Kind, Severity};
 use crate::source::{Inbound, Sink, Source};
 
 const MIN_INTERVAL_SECS: u64 = 15;
-const SSO_LOGIN: &str = "sso-login";
 
 fn creds(account: &AwsAccount, secret: Option<&str>) -> Result<Creds, String> {
     Creds::resolve(
@@ -131,20 +127,20 @@ fn error_key(account: &AwsAccount) -> String {
 }
 
 /// An expired or missing SSO session, as the CLI words it.
-fn needs_sso_login(err: &str) -> bool {
+fn sso_expired(err: &str) -> bool {
     let e = err.to_lowercase();
     e.contains("sso") || e.contains("expired") || e.contains("token")
 }
 
 fn error_island(account: &AwsAccount, err: &str) -> Island {
-    let profile = account.profile.as_deref().unwrap_or("default");
-    let sso = account.auth == AwsAuth::Profile && needs_sso_login(err);
     let hint = match &account.auth {
-        AwsAuth::Profile if sso => format!("SSO session for {profile} has expired"),
-        AwsAuth::Profile => "Check the profile and region in Mission settings".into(),
+        AwsAuth::Profile if sso_expired(err) => {
+            "SSO session expired: switch this account to an access key".into()
+        }
+        AwsAuth::Profile => "Check the profile and region in Mission settings".to_string(),
         AwsAuth::AccessKey { .. } => "Check the access key in Mission settings".into(),
     };
-    let island = Island::new(
+    Island::new(
         &error_key(account),
         Kind::Message { sender: None },
         &format!("Lost signal from {}", label(account)),
@@ -155,12 +151,7 @@ fn error_island(account: &AwsAccount, err: &str) -> Island {
     .severity(Severity::Warning)
     .compact("AWS")
     .revision(err.to_string())
-    .ttl(600);
-    if sso {
-        island.action(Action::new(SSO_LOGIN, "Sign in").primary())
-    } else {
-        island
-    }
+    .ttl(600)
 }
 
 impl Source for CloudWatch {
@@ -177,8 +168,6 @@ impl Source for CloudWatch {
         ));
         // Per account, the alarms in ALARM at the last good poll (keyed by island key).
         let mut known: HashMap<usize, HashMap<String, AlarmState>> = HashMap::new();
-        // Set when a Sign in finishes, to poll straight away.
-        let poll_now = Arc::new(AtomicBool::new(false));
         loop {
             let started = Instant::now();
             for (i, account) in self.config.accounts.iter().enumerate() {
@@ -218,40 +207,12 @@ impl Source for CloudWatch {
                     }
                 }
             }
-            // Wait out the interval, in short steps so a finished Sign in
-            // can cut it short.
+            // Wait out the interval; actions on alarm islands are all built in.
             let deadline = started + interval;
-            while !poll_now.swap(false, Ordering::Relaxed) {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                match inbox.recv_timeout(left.min(Duration::from_secs(1))) {
-                    Ok(Inbound::Action { key, action }) if action == SSO_LOGIN => {
-                        let Some(account) =
-                            self.config.accounts.iter().find(|a| error_key(a) == key)
-                        else {
-                            continue;
-                        };
-                        let profile = account.profile.clone().unwrap_or_else(|| "default".into());
-                        let (cli, sink, done) = (self.cli.clone(), sink.clone(), poll_now.clone());
-                        sink.status(format!(
-                            "cloudwatch: signing in to {profile} in the browser"
-                        ));
-                        // Waits for the browser, so off this thread.
-                        std::thread::spawn(move || {
-                            match aws::sso_login(cli.as_deref(), &profile) {
-                                Ok(msg) => {
-                                    sink.status(format!("cloudwatch: {msg}"));
-                                    done.store(true, Ordering::Relaxed);
-                                }
-                                Err(e) => {
-                                    sink.status(format!("cloudwatch: sign in to {profile}: {e}"))
-                                }
-                            }
-                        });
-                    }
-                    Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+            loop {
+                match inbox.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(_) => continue,
+                    Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => return,
                 }
             }
