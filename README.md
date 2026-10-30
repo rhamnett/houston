@@ -206,6 +206,30 @@ In `~/Library/Application Support/houston/config.json`:
 }
 ```
 
+Each account signs its calls in one of two ways, set under **Credentials**
+in Mission settings:
+
+- **CLI profile or SSO**: any profile in `~/.aws/config`, offered as you
+  type. **Sign in with SSO** runs `aws sso login --profile …` and opens your
+  browser, exactly as on the command line. When a session expires, the
+  "Lost signal" island has a **Sign in** button that does the same and polls
+  again once you've approved it.
+- **IAM access key**: a long-lived key for a read-only user. The key ID goes
+  in the config file and the secret key goes in the Keychain (as
+  `aws-secret:<key id>`). Both reach the AWS CLI through environment
+  variables, never as command-line arguments. Removing the account removes
+  its secret too.
+
+```json
+{ "auth": { "type": "access_key", "access_key_id": "AKIA…" }, "region": "eu-west-2", "label": "voip" }
+```
+
+**Discover alarms** lists every alarm in the account (in any state, under
+the prefix) with its current state and condition. Tick the ones to watch,
+which saves them to `include`, or tick none to watch everything that matches
+the prefix. Giving an alarm a severity saves an exact-name alarm rule at the
+top of the list.
+
 - An alarm that enters ALARM appears as a sticky critical island, with
   **Console ↗** and **Snooze 1h**.
 - An alarm that leaves ALARM gets a 20-second OK island.

@@ -29,9 +29,29 @@ pub enum PrefsMessage {
         #[serde(default)]
         secrets: HashMap<String, String>,
     },
+    /// One poll as this account. `secret` is an access key's secret typed
+    /// but not saved yet; the Keychain's is used otherwise.
     TestCloudwatch {
         id: String,
         account: AwsAccount,
+        #[serde(default)]
+        aws_cli: Option<String>,
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    /// Every alarm in the account, any state, to pick from.
+    DiscoverAlarms {
+        id: String,
+        account: AwsAccount,
+        #[serde(default)]
+        aws_cli: Option<String>,
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    /// `aws sso login --profile …` in the browser.
+    SsoLogin {
+        id: String,
+        profile: String,
         #[serde(default)]
         aws_cli: Option<String>,
     },
@@ -58,6 +78,8 @@ pub enum PrefsMessage {
 pub struct SecretFlags {
     pub api_token: bool,
     pub linear_api_key: bool,
+    /// Access key id → whether its secret is in the Keychain.
+    pub aws: HashMap<String, bool>,
 }
 
 pub struct Prefs {
@@ -150,7 +172,7 @@ const PAGE: &str = r##"<!doctype html>
     padding: 5px 8px; width: 100%; min-width: 0; }
   textarea { min-height: 64px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
   input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .switch { position: relative; width: 38px; height: 22px; }
+  .switch { position: relative; display: inline-block; vertical-align: middle; width: 38px; height: 22px; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .switch span { position: absolute; inset: 0; background: var(--chip); border-radius: 11px; transition: .2s; cursor: pointer; }
   .switch span::after { content: ""; position: absolute; width: 18px; height: 18px; left: 2px; top: 2px;
@@ -180,6 +202,18 @@ const PAGE: &str = r##"<!doctype html>
   footer .msg.err { color: var(--danger); } footer .msg.ok { color: var(--ok); }
   .tryrule { display: flex; gap: 8px; margin: 12px 0 4px; }
   tr.hit td { background: rgba(10,132,255,.12); }
+  .cardhead { display: flex; align-items: center; gap: 8px; padding: 12px 0 8px; border-bottom: 1px solid var(--line); }
+  .cardhead b { font-size: 14px; }
+  .grow { flex: 1; }
+  .disc { margin: 8px 0 12px; }
+  .disc .tools { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .disc .scroll { max-height: 280px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+  .disc th { position: sticky; top: 0; background: var(--panel); }
+  .disc td { border-top: 1px solid var(--line); font-size: 12px; }
+  .disc td.name { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; word-break: break-all; }
+  .disc select { width: auto; padding: 2px 4px; font-size: 12px; }
+  .st { font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 5px; background: var(--chip); }
+  .st.ALARM { color: var(--danger); } .st.OK { color: var(--ok); } .st.INSUFFICIENT_DATA { color: #ff9f0a; }
   code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
 </style></head>
 <body>
@@ -206,6 +240,8 @@ let secretFlags = {};   // which secrets are in the Keychain
 let secretEdits = {};   // account -> new value ("" removes)
 let statuses = [];
 let results = {};       // test id -> {cls, text}
+let profiles = [];      // from ~/.aws/config
+let discovered = {};    // "cw<i>" -> alarms found by Discover alarms
 let ruleHit = null;
 
 const get = (path) => path.split(".").reduce((o, k) => o?.[k], cfg);
@@ -254,6 +290,59 @@ function secretField(account, flag, placeholder) {
     ${state}${flag && edit === undefined ? `<button class="small danger" data-act="remove-secret" data-account="${account}">Remove</button>` : ""}</div>`;
 }
 
+// AWS credentials for an account or the SQS queue at `base`.
+function credsBlock(base) {
+  const auth = get(base + ".auth") || { type: "profile" };
+  const isKey = auth.type === "access_key";
+  const akid = isKey ? auth.access_key_id || "" : "";
+  const prof = get(base + ".profile") || "";
+  const known = profiles.find((p) => p.name === (prof || "default"));
+  const picker = `<select data-auth="${base}">
+      <option value="profile" ${isKey ? "" : "selected"}>CLI profile or SSO</option>
+      <option value="access_key" ${isKey ? "selected" : ""}>IAM access key</option></select>`;
+  if (isKey) {
+    return row("Credentials", picker) +
+      row("Access key ID", `<input type="text" data-path="${base}.auth.access_key_id" data-kind="text" data-rerender value="${esc(akid)}" placeholder="AKIA…" autocomplete="off">`) +
+      row("Secret access key", akid ? secretField("aws-secret:" + akid, secretFlags.aws?.[akid], "wJalrXUtnFEMI…") : `<span class="pill">enter the key ID first</span>`,
+        "Kept in the Keychain. Best as a user that can only read alarms (and the queue).");
+  }
+  const id = "sso:" + base;
+  return row("Credentials", picker) +
+    row("Profile", `<div class="secret"><input type="text" list="aws-profiles" data-path="${base}.profile" data-kind="opt" value="${esc(prof)}" placeholder="default">
+        <button class="small" data-act="sso" data-base="${base}">Sign in with SSO</button></div>${result(id)}`,
+      known ? `${known.sso ? "SSO profile" : "Profile"} from ~/.aws/config${known.region ? `, region ${esc(known.region)}` : ""}.`
+        : "Any profile in ~/.aws/config. Sign in with SSO runs <code>aws sso login --profile …</code> and opens your browser.");
+}
+
+function secretFor(base) {
+  const auth = get(base + ".auth");
+  return auth?.type === "access_key" ? secretEdits["aws-secret:" + auth.access_key_id] || null : null;
+}
+
+function discoverTable(i) {
+  const found = discovered["cw" + i];
+  if (!found) return "";
+  const acct = cfg.cloudwatch.accounts[i];
+  const include = acct.include || [];
+  const sevOf = (name) => (cfg.alarm_rules.find((r) => r.pattern === name) || {}).severity || "";
+  return `<div class="disc">
+    <div class="tools"><input type="text" data-filter="${i}" placeholder="Filter ${found.length} alarms">
+      <button class="small" data-act="watch-shown" data-i="${i}">Tick shown</button>
+      <button class="small" data-act="watch-all" data-i="${i}">Watch everything</button></div>
+    <div class="hint" style="margin:0 0 6px">${include.length ? `Watching <b>${include.length}</b> ticked alarm(s).`
+      : "Nothing ticked, so every alarm matching the prefix is watched. Tick some to watch only those."}
+      Severity saves an exact-name alarm rule.</div>
+    <div class="scroll"><table><thead><tr><th>Watch</th><th>Alarm</th><th>Now</th><th>Condition</th><th>Severity</th></tr></thead><tbody>
+    ${found.map((a) => `<tr data-name="${esc(a.name.toLowerCase())}">
+      <td class="narrow"><input type="checkbox" data-act="watch" data-i="${i}" data-name="${esc(a.name)}" ${include.includes(a.name) ? "checked" : ""}></td>
+      <td class="name" title="${esc(a.description || "")}">${esc(a.name)}</td>
+      <td class="narrow"><span class="st ${esc(a.state)}">${esc(a.state === "INSUFFICIENT_DATA" ? "NO DATA" : a.state)}</span></td>
+      <td>${esc(a.metric || "")}</td>
+      <td class="narrow"><select data-sev="${esc(a.name)}">${["", "critical", "warning", "info"].map((v) =>
+        `<option value="${v}" ${sevOf(a.name) === v ? "selected" : ""}>${v || "default"}</option>`).join("")}</select></td></tr>`).join("")}
+    </tbody></table></div></div>`;
+}
+
 // ---- sections -------------------------------------------------------------
 const VIEWS = {
   general: () => `
@@ -275,19 +364,23 @@ const VIEWS = {
       ${row("Enabled", toggle("cloudwatch.enabled"))}
       ${row("Poll every (s)", num("cloudwatch.interval_secs", 15, 3600), "15 s minimum.")}
     </div>
-    <div class="card">
-      <table><thead><tr><th>Profile</th><th>Region</th><th>Label</th><th>Alarm prefix</th><th></th></tr></thead><tbody>
-      ${(cfg.cloudwatch.accounts || []).map((a, i) => `<tr>
-        <td>${optText(`cloudwatch.accounts.${i}.profile`, "default")}</td>
-        <td>${optText(`cloudwatch.accounts.${i}.region`, "eu-west-2")}</td>
-        <td>${optText(`cloudwatch.accounts.${i}.label`, "shown on cards")}</td>
-        <td>${optText(`cloudwatch.accounts.${i}.alarm_prefix`, "apollo-prod-")}</td>
-        <td class="narrow"><button class="small" data-act="test-cw" data-i="${i}">Test</button>
-          <button class="small danger" data-act="del" data-list="cloudwatch.accounts" data-i="${i}">✕</button></td></tr>
-        <tr><td colspan="5">${result("cw" + i)}</td></tr>`).join("")}
-      </tbody></table>
-      <p><button data-act="add-account">+ Add account</button></p>
-    </div>`,
+    ${(cfg.cloudwatch.accounts || []).map((a, i) => {
+      const base = `cloudwatch.accounts.${i}`;
+      const name = a.label || (a.auth?.type === "access_key" ? "Access key account" : a.profile) || "New account";
+      const watching = (a.include || []).length ? `${a.include.length} alarm(s)` : (a.alarm_prefix ? `${esc(a.alarm_prefix)}*` : "all alarms");
+      return `<div class="card">
+        <div class="cardhead"><b>${esc(name)}</b><span class="pill">${watching}</span><span class="grow"></span>
+          <button class="small" data-act="test-cw" data-i="${i}">Test</button>
+          <button class="small" data-act="discover" data-i="${i}">Discover alarms</button>
+          <button class="small danger" data-act="del" data-list="cloudwatch.accounts" data-i="${i}">Remove</button></div>
+        ${result("cw" + i)}
+        ${row("Label", optText(`${base}.label`, "shown on cards, e.g. apollo prod"))}
+        ${row("Region", optText(`${base}.region`, "eu-west-2"))}
+        ${row("Alarm prefix", optText(`${base}.alarm_prefix`, "apollo-prod-"), "Only alarms whose names start with this. Discover alarms uses it too.")}
+        ${credsBlock(base)}
+        ${discoverTable(i)}</div>`;
+    }).join("")}
+    <p><button data-act="add-account">+ Add account</button></p>`,
 
   sqs: () => `
     <h1>SQS</h1>
@@ -295,8 +388,8 @@ const VIEWS = {
     <div class="card">
       ${row("Enabled", toggle("sqs.enabled"))}
       ${row("Queue URL", text("sqs.queue_url", "https://sqs.eu-west-2.amazonaws.com/123456789012/houston"))}
-      ${row("Profile", optText("sqs.profile", "default"))}
       ${row("Region", optText("sqs.region", "eu-west-2"))}
+      ${credsBlock("sqs")}
       ${row("Long-poll wait (s)", num("sqs.wait_secs", 1, 20))}
     </div>`,
 
@@ -371,7 +464,8 @@ function render() {
         iot: cfg.iot.enabled, api: cfg.api.enabled }[id];
       return `<a data-tab="${id}" class="${tab === id ? "on" : ""}">${label}${live === undefined ? "" : `<span class="dot ${live ? "live" : ""}"></span>`}</a>`;
     }).join("");
-  $("main").innerHTML = VIEWS[tab]();
+  $("main").innerHTML = VIEWS[tab]() +
+    `<datalist id="aws-profiles">${profiles.map((p) => `<option value="${esc(p.name)}">${p.sso ? "SSO" : ""}</option>`).join("")}</datalist>`;
 }
 
 // ---- events -----------------------------------------------------------------
@@ -390,7 +484,28 @@ document.addEventListener("input", (e) => {
   set(path, v);
   if (kind === "bool" && /\.enabled$/.test(path)) render();
 });
-document.addEventListener("change", (e) => { if (e.target.tagName === "SELECT") e.target.dispatchEvent(new Event("input", { bubbles: true })); });
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (el.dataset.auth) {
+    set(el.dataset.auth + ".auth", el.value === "access_key" ? { type: "access_key", access_key_id: "" } : { type: "profile" });
+    render(); return;
+  }
+  if (el.dataset.sev !== undefined) {
+    const name = el.dataset.sev, at = cfg.alarm_rules.findIndex((r) => r.pattern === name);
+    if (!el.value) { if (at >= 0) cfg.alarm_rules.splice(at, 1); }
+    else if (at >= 0) cfg.alarm_rules[at].severity = el.value;
+    // Exact names go first: the first matching rule wins.
+    else cfg.alarm_rules.unshift({ pattern: name, severity: el.value, sticky: null, silent: false, mute: false, runbook_url: null });
+    dirty(); return;
+  }
+  if (el.hasAttribute("data-rerender")) { render(); return; }
+  if (el.tagName === "SELECT") el.dispatchEvent(new Event("input", { bubbles: true }));
+});
+document.addEventListener("input", (e) => {
+  const i = e.target.dataset.filter; if (i === undefined) return;
+  const q = e.target.value.trim().toLowerCase();
+  e.target.closest(".disc").querySelectorAll("tbody tr").forEach((tr) => { tr.style.display = tr.dataset.name.includes(q) ? "" : "none"; });
+});
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab]");
@@ -398,12 +513,25 @@ document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]"); if (!b) return;
   const i = Number(b.dataset.i);
   switch (b.dataset.act) {
-    case "add-account": cfg.cloudwatch.accounts.push({ profile: null, region: "eu-west-2", label: null, alarm_prefix: null }); dirty(); render(); break;
+    case "add-account": cfg.cloudwatch.accounts.push({ auth: { type: "profile" }, profile: null, region: "eu-west-2", label: null, alarm_prefix: null, include: [] }); dirty(); render(); break;
+    case "sso": { const base = b.dataset.base, id = "sso:" + base;
+      results[id] = { cls: "busy", text: "Opening your browser. Approve the sign-in there…" }; render();
+      post({ type: "sso_login", id, profile: get(base + ".profile") || "default", aws_cli: cfg.aws_cli }); break; }
+    case "discover": results["cw" + i] = { cls: "busy", text: "Scanning for alarms…" }; render();
+      post({ type: "discover_alarms", id: "cw" + i, account: cfg.cloudwatch.accounts[i], aws_cli: cfg.aws_cli, secret: secretFor(`cloudwatch.accounts.${i}`) }); break;
+    case "watch": { const inc = (cfg.cloudwatch.accounts[i].include ??= []), n = b.dataset.name;
+      const at = inc.indexOf(n); if (b.checked && at < 0) inc.push(n); if (!b.checked && at >= 0) inc.splice(at, 1);
+      dirty(); render(); break; }
+    case "watch-shown": { const inc = (cfg.cloudwatch.accounts[i].include ??= []);
+      b.closest(".disc").querySelectorAll("tbody tr").forEach((tr) => { if (tr.style.display !== "none") {
+        const n = tr.querySelector("[data-name]").dataset.name; if (!inc.includes(n)) inc.push(n); } });
+      dirty(); render(); break; }
+    case "watch-all": cfg.cloudwatch.accounts[i].include = []; dirty(); render(); break;
     case "add-rule": cfg.alarm_rules.push({ pattern: "", severity: null, sticky: null, silent: false, mute: false, runbook_url: null }); dirty(); render(); break;
     case "del": get(b.dataset.list).splice(i, 1); dirty(); render(); break;
     case "up": if (i > 0) { const r = cfg.alarm_rules; [r[i - 1], r[i]] = [r[i], r[i - 1]]; dirty(); render(); } break;
     case "test-cw": results["cw" + i] = { cls: "busy", text: "Calling Houston… (describe-alarms)" }; render();
-      post({ type: "test_cloudwatch", id: "cw" + i, account: cfg.cloudwatch.accounts[i], aws_cli: cfg.aws_cli }); break;
+      post({ type: "test_cloudwatch", id: "cw" + i, account: cfg.cloudwatch.accounts[i], aws_cli: cfg.aws_cli, secret: secretFor(`cloudwatch.accounts.${i}`) }); break;
     case "test-linear": results.linear = { cls: "busy", text: "Hailing Linear…" }; render();
       post({ type: "test_linear", id: "linear", linear: cfg.linear, api_key: secretEdits["linear-api-key"] || null }); break;
     case "try-rule": post({ type: "test_rule", name: $("tryname").value, rules: cfg.alarm_rules }); break;
@@ -423,7 +551,7 @@ document.addEventListener("keydown", (e) => {
 window.__prefs = (m) => {
   switch (m.type) {
     case "state":
-      statuses = m.statuses; secretFlags = m.secrets;
+      statuses = m.statuses; secretFlags = m.secrets; profiles = m.profiles || [];
       if (!saved || m.reset) { saved = m.config; cfg = structuredClone(saved); secretEdits = {}; dirty(); }
       render(); break;
     case "status": statuses = m.statuses; if (tab === "general") render(); break;
@@ -431,6 +559,10 @@ window.__prefs = (m) => {
       if (m.error) { msg(m.error, "err"); $("save").disabled = false; break; }
       msg(m.restarted.length ? `Saved. Restarted ${m.restarted.join(", ")}. Roger that.` : "Saved. Roger that.", "ok"); break;
     case "test": results[m.id] = { cls: m.ok ? "ok" : "err", text: m.text }; render(); break;
+    case "discovered":
+      if (m.error) { results[m.id] = { cls: "err", text: m.error }; delete discovered[m.id]; }
+      else { discovered[m.id] = m.alarms; results[m.id] = { cls: "ok", text: `Found ${m.alarms.length} alarm(s), ${m.alarms.filter((a) => a.state === "ALARM").length} in ALARM now.` }; }
+      render(); break;
     case "rule":
       ruleHit = m.index;
       results.rule = m.index === null ? { cls: "", text: "No rule matches: it stays a sticky critical." }

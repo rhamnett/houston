@@ -6,6 +6,9 @@
 //! - EventBridge `CloudWatch Alarm State Change` events
 //! - SNS alarm notifications, raw or inside an SNS envelope
 //!
+//! It also resolves credentials (a CLI profile, or an IAM access key from the
+//! Keychain), lists local profiles and discovers alarms for Preferences.
+//!
 //! It also maps Security Hub findings (EventBridge `Security Hub Findings -
 //! Imported`, raw or inside an SNS envelope) and applies the `alarm_rules`
 //! from the config.
@@ -13,10 +16,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::config::AlarmRule;
+use crate::config::{AlarmRule, AwsAuth};
 use crate::island::{Action, Island, Kind, Severity};
+use crate::secrets;
 
 /// One alarm's state, whichever way it reached us.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -552,18 +556,83 @@ fn find_cli() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("aws"))
 }
 
-/// Run the AWS CLI and return stdout. Login items start with a bare PATH, so
-/// the usual install locations are added for credential helpers.
-pub fn cli(binary: Option<&str>, args: &[&str]) -> Result<String, String> {
+/// Who an AWS call runs as. Built fresh for each call, so a rotated key or a
+/// new SSO session is picked up without a restart.
+#[derive(Clone, Default)]
+pub struct Creds {
+    pub profile: Option<String>,
+    pub region: Option<String>,
+    /// (access key id, secret access key).
+    access_key: Option<(String, String)>,
+}
+
+/// Never print the secret.
+impl std::fmt::Debug for Creds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Creds")
+            .field("profile", &self.profile)
+            .field("region", &self.region)
+            .field("access_key_id", &self.access_key.as_ref().map(|(id, _)| id))
+            .finish()
+    }
+}
+
+impl Creds {
+    /// For `auth`; an access key's secret comes from `secret` if given (typed
+    /// in Preferences, not saved yet), else from the Keychain.
+    pub fn resolve(
+        auth: &AwsAuth,
+        profile: Option<&str>,
+        region: Option<&str>,
+        secret: Option<&str>,
+    ) -> Result<Self, String> {
+        let access_key = match auth {
+            AwsAuth::Profile => None,
+            AwsAuth::AccessKey { access_key_id } => {
+                let key = secret
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .or_else(|| secrets::get_aws_secret(access_key_id))
+                    .ok_or_else(|| format!("No secret key for {access_key_id} in the Keychain"))?;
+                Some((access_key_id.clone(), key))
+            }
+        };
+        Ok(Self {
+            // A profile would override the keys, so it is dropped with them.
+            profile: profile
+                .filter(|p| !p.is_empty() && access_key.is_none())
+                .map(String::from),
+            region: region.filter(|r| !r.is_empty()).map(String::from),
+            access_key,
+        })
+    }
+}
+
+/// Run the AWS CLI as `creds` and return stdout. Access keys go in the
+/// environment, never on the command line where `ps` would show them. Login
+/// items start with a bare PATH, so the usual install locations are added for
+/// credential helpers.
+pub fn cli(binary: Option<&str>, args: &[&str], creds: &Creds) -> Result<String, String> {
     let bin = binary.map(PathBuf::from).unwrap_or_else(find_cli);
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}",
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = Command::new(&bin)
-        .args(args)
-        .env("PATH", path)
-        .env("AWS_PAGER", "")
+    let mut cmd = Command::new(&bin);
+    cmd.args(args).env("PATH", path).env("AWS_PAGER", "");
+    if let Some(p) = &creds.profile {
+        cmd.args(["--profile", p]);
+    }
+    if let Some(r) = &creds.region {
+        cmd.args(["--region", r]);
+    }
+    if let Some((id, secret)) = &creds.access_key {
+        cmd.env("AWS_ACCESS_KEY_ID", id)
+            .env("AWS_SECRET_ACCESS_KEY", secret)
+            .env_remove("AWS_SESSION_TOKEN")
+            .env_remove("AWS_PROFILE");
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("{}: {e}", display(&bin)))?;
     if !out.status.success() {
@@ -578,20 +647,114 @@ pub fn cli(binary: Option<&str>, args: &[&str]) -> Result<String, String> {
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
 }
 
+/// `aws sso login --profile …`: opens the browser and returns once the user
+/// has approved it (or given up).
+pub fn sso_login(binary: Option<&str>, profile: &str) -> Result<String, String> {
+    let creds = Creds::default();
+    cli(binary, &["sso", "login", "--profile", profile], &creds)?;
+    Ok(format!("Signed in to {profile}."))
+}
+
 fn display(p: &Path) -> String {
     p.display().to_string()
 }
 
-/// `--profile`/`--region` arguments when set.
-pub fn profile_args<'a>(profile: Option<&'a str>, region: Option<&'a str>) -> Vec<&'a str> {
-    let mut v = Vec::new();
-    if let Some(p) = profile {
-        v.extend(["--profile", p]);
+/// A profile in ~/.aws/config, for the picker in Preferences.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Profile {
+    pub name: String,
+    pub sso: bool,
+    pub region: Option<String>,
+}
+
+/// Profiles from ~/.aws/config (`AWS_CONFIG_FILE` if set), without running
+/// the CLI.
+pub fn profiles() -> Vec<Profile> {
+    let path = std::env::var_os("AWS_CONFIG_FILE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".aws/config")));
+    path.and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| parse_profiles(&text))
+        .unwrap_or_default()
+}
+
+fn parse_profiles(text: &str) -> Vec<Profile> {
+    let mut out: Vec<Profile> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            let name = match header.trim() {
+                "default" => Some("default"),
+                h => h.strip_prefix("profile ").map(str::trim),
+            };
+            if let Some(name) = name {
+                out.push(Profile {
+                    name: name.to_string(),
+                    sso: false,
+                    region: None,
+                });
+            } else {
+                // An [sso-session …] or other section: not a profile.
+                out.push(Profile {
+                    name: String::new(),
+                    sso: false,
+                    region: None,
+                });
+            }
+            continue;
+        }
+        let (Some(current), Some((k, v))) = (out.last_mut(), line.split_once('=')) else {
+            continue;
+        };
+        match k.trim() {
+            "sso_session" | "sso_start_url" => current.sso = true,
+            "region" => current.region = Some(v.trim().to_string()),
+            _ => {}
+        }
     }
-    if let Some(r) = region {
-        v.extend(["--region", r]);
+    out.retain(|p| !p.name.is_empty());
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// One alarm found by Discover alarms.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Discovered {
+    pub name: String,
+    pub state: String,
+    pub metric: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Every alarm (any state) in the account, optionally under a prefix.
+pub fn discover_alarms(
+    binary: Option<&str>,
+    creds: &Creds,
+    prefix: Option<&str>,
+) -> Result<Vec<Discovered>, String> {
+    let mut args = vec![
+        "cloudwatch",
+        "describe-alarms",
+        "--alarm-types",
+        "MetricAlarm",
+        "CompositeAlarm",
+        "--output",
+        "json",
+    ];
+    if let Some(p) = prefix.filter(|p| !p.is_empty()) {
+        args.extend(["--alarm-name-prefix", p]);
     }
-    v
+    let out = cli(binary, &args, creds)?;
+    let mut found: Vec<Discovered> = parse_describe_alarms(&out)?
+        .into_iter()
+        .map(|a| Discovered {
+            metric: a.condition(),
+            name: a.name,
+            state: a.state,
+            description: a.description,
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -726,5 +889,37 @@ mod tests {
         // An alarm envelope is not a finding, and a finding is not an alarm.
         assert!(findings_from_message(DESCRIBE).is_empty());
         assert!(alarm_from_message(&env).is_none());
+    }
+
+    #[test]
+    fn profiles_from_config() {
+        let text = "[default]\nregion = eu-west-1\n\n[profile apollo-voip]\nsso_session = arrow\nregion=eu-west-2\n\n[sso-session arrow]\nsso_start_url = https://x.awsapps.com/start\n\n[profile ci]\ncredential_process = /bin/true\n";
+        let p = parse_profiles(text);
+        let names: Vec<&str> = p.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["apollo-voip", "ci", "default"]);
+        assert!(p[0].sso && !p[1].sso);
+        assert_eq!(p[0].region.as_deref(), Some("eu-west-2"));
+    }
+
+    #[test]
+    fn access_keys_drop_the_profile() {
+        let auth = AwsAuth::AccessKey {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+        };
+        let c = Creds::resolve(
+            &auth,
+            Some("apollo-prod"),
+            Some("eu-west-2"),
+            Some("s3cr3t"),
+        )
+        .unwrap();
+        assert!(c.access_key.is_some());
+        assert_eq!(c.profile, None);
+        assert!(
+            !format!("{c:?}").contains("s3cr3t"),
+            "Debug hides the secret"
+        );
+        let p = Creds::resolve(&AwsAuth::Profile, Some("apollo-prod"), None, None).unwrap();
+        assert_eq!(p.profile.as_deref(), Some("apollo-prod"));
     }
 }

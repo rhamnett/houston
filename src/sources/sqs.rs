@@ -58,16 +58,18 @@ impl Sqs {
         Self { config, rules, cli }
     }
 
-    fn base_args(&self) -> Vec<&str> {
-        aws::profile_args(
+    fn creds(&self) -> Result<aws::Creds, String> {
+        aws::Creds::resolve(
+            &self.config.auth,
             self.config.profile.as_deref(),
             self.config.region.as_deref(),
+            None,
         )
     }
 
     fn receive(&self) -> Result<Vec<Message>, String> {
         let wait = self.config.wait_secs.clamp(1, 20).to_string();
-        let mut args = vec![
+        let args = vec![
             "sqs",
             "receive-message",
             "--queue-url",
@@ -79,8 +81,7 @@ impl Sqs {
             "--output",
             "json",
         ];
-        args.extend(self.base_args());
-        let out = aws::cli(self.cli.as_deref(), &args)?;
+        let out = aws::cli(self.cli.as_deref(), &args, &self.creds()?)?;
         // The CLI prints nothing when the queue was empty.
         if out.trim().is_empty() {
             return Ok(Vec::new());
@@ -91,7 +92,7 @@ impl Sqs {
     }
 
     fn delete(&self, receipt: &str) -> Result<(), String> {
-        let mut args = vec![
+        let args = vec![
             "sqs",
             "delete-message",
             "--queue-url",
@@ -99,8 +100,7 @@ impl Sqs {
             "--receipt-handle",
             receipt,
         ];
-        args.extend(self.base_args());
-        aws::cli(self.cli.as_deref(), &args).map(|_| ())
+        aws::cli(self.cli.as_deref(), &args, &self.creds()?).map(|_| ())
     }
 }
 

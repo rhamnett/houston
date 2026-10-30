@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::config::Config;
 use crate::source::Source;
 
-pub use cloudwatch::probe as probe_cloudwatch;
+pub use cloudwatch::{discover as discover_alarms, probe as probe_cloudwatch};
 pub use demo::DEMO_ID;
 pub use demo::TRIGGERS as DEMO_TRIGGERS;
 pub use linear::probe as probe_linear;

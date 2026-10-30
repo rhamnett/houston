@@ -365,7 +365,17 @@ impl App {
             "secrets": SecretFlags {
                 api_token: !self.config.api.token.is_empty(),
                 linear_api_key: !self.config.linear.api_key.is_empty(),
+                aws: self
+                    .config
+                    .access_key_ids()
+                    .into_iter()
+                    .map(|id| {
+                        let set = secrets::get_aws_secret(&id).is_some();
+                        (id, set)
+                    })
+                    .collect(),
             },
+            "profiles": aws::profiles(),
             "statuses": self.statuses,
         })
     }
@@ -412,10 +422,37 @@ impl App {
                 id,
                 account,
                 aws_cli,
+                secret,
             } => {
                 self.in_background(id, move || {
-                    sources::probe_cloudwatch(&account, aws_cli.as_deref())
+                    sources::probe_cloudwatch(&account, aws_cli.as_deref(), secret.as_deref())
                 });
+            }
+            PrefsMessage::DiscoverAlarms {
+                id,
+                account,
+                aws_cli,
+                secret,
+            } => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let reply = match sources::discover_alarms(
+                        &account,
+                        aws_cli.as_deref(),
+                        secret.as_deref(),
+                    ) {
+                        Ok(alarms) => json!({"type": "discovered", "id": id, "alarms": alarms}),
+                        Err(e) => json!({"type": "discovered", "id": id, "error": e}),
+                    };
+                    let _ = proxy.send_event(UserEvent::PrefsReply(reply));
+                });
+            }
+            PrefsMessage::SsoLogin {
+                id,
+                profile,
+                aws_cli,
+            } => {
+                self.in_background(id, move || aws::sso_login(aws_cli.as_deref(), &profile));
             }
             PrefsMessage::TestLinear {
                 id,
@@ -478,13 +515,28 @@ impl App {
             serde_json::from_value(value).map_err(|e| format!("Couldn't read the form: {e}"))?;
         next.keep_secrets(&self.config);
         next.validate()?;
+        let key_ids = next.access_key_ids();
         for (account, value) in secret_edits {
+            if let Some(id) = account.strip_prefix("aws-secret:") {
+                if key_ids.iter().any(|k| k == id) {
+                    secrets::set_aws_secret(id, value.trim())?;
+                } // else typed for an account that was then removed
+                continue;
+            }
             let secret = Secret::ALL
                 .into_iter()
                 .find(|s| s.account() == account)
                 .filter(|s| *s != Secret::ApiToken)
                 .ok_or_else(|| format!("Unknown secret {account}"))?;
             next.set_secret(secret, value.trim())?;
+        }
+        // Don't leave secrets behind for access keys no longer in use.
+        for old in self.config.access_key_ids() {
+            if !key_ids.contains(&old)
+                && let Err(e) = secrets::set_aws_secret(&old, "")
+            {
+                log::line(&format!("preferences: {e}"));
+            }
         }
         let changed: Vec<&str> = sources::RESTARTABLE
             .iter()

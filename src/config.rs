@@ -70,9 +70,25 @@ impl Default for DemoConfig {
     }
 }
 
-/// One AWS CLI profile and region to poll.
+/// How Houston signs AWS calls.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AwsAuth {
+    /// A CLI profile: SSO (`aws sso login --profile …`), a credential process,
+    /// or keys in ~/.aws/credentials.
+    #[default]
+    Profile,
+    /// A long-lived IAM access key. The secret half is in the Keychain under
+    /// `aws-secret:<access_key_id>`; only the id is in the file.
+    AccessKey { access_key_id: String },
+}
+
+/// One AWS account and region to poll.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AwsAccount {
+    #[serde(default)]
+    pub auth: AwsAuth,
+    /// The CLI profile, when `auth` is a profile.
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
@@ -83,6 +99,10 @@ pub struct AwsAccount {
     /// Only alarms whose names start with this.
     #[serde(default)]
     pub alarm_prefix: Option<String>,
+    /// Only these alarms (exact names), as picked with Discover alarms in
+    /// Mission settings. Empty watches every alarm matching the prefix.
+    #[serde(default)]
+    pub include: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,8 +123,7 @@ impl Default for CloudWatchConfig {
             accounts: vec![AwsAccount {
                 profile: Some("default".into()),
                 region: Some("eu-west-2".into()),
-                label: None,
-                alarm_prefix: None,
+                ..AwsAccount::default()
             }],
         }
     }
@@ -116,6 +135,8 @@ pub struct SqsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub queue_url: String,
+    #[serde(default)]
+    pub auth: AwsAuth,
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
@@ -129,6 +150,7 @@ impl Default for SqsConfig {
         Self {
             enabled: false,
             queue_url: String::new(),
+            auth: AwsAuth::default(),
             profile: None,
             region: None,
             wait_secs: default_wait(),
@@ -309,6 +331,26 @@ impl Config {
         Ok(())
     }
 
+    /// Every IAM access key id the config uses, for their Keychain secrets.
+    pub fn access_key_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .cloudwatch
+            .accounts
+            .iter()
+            .map(|a| &a.auth)
+            .chain([&self.sqs.auth])
+            .filter_map(|auth| match auth {
+                AwsAuth::AccessKey { access_key_id } if !access_key_id.is_empty() => {
+                    Some(access_key_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Keep `from`'s secrets (Preferences never sees them, so a config it
     /// sends back has them blank).
     pub fn keep_secrets(&mut self, from: &Config) {
@@ -325,6 +367,21 @@ impl Config {
         }
         if self.sqs.enabled && !self.sqs.queue_url.starts_with("https://") {
             problems.push("SQS queue URL must start with https://.".into());
+        }
+        let auths = self
+            .cloudwatch
+            .accounts
+            .iter()
+            .map(|a| &a.auth)
+            .chain([&self.sqs.auth]);
+        for auth in auths {
+            if let AwsAuth::AccessKey { access_key_id } = auth
+                && !secrets::is_access_key_id(access_key_id)
+            {
+                problems.push(format!(
+                    "\"{access_key_id}\" doesn't look like an access key id (AKIA…)."
+                ));
+            }
         }
         if self.linear.enabled && !(1..=4).contains(&self.linear.max_priority) {
             problems.push("Linear priority must be 1 to 4.".into());
@@ -444,6 +501,25 @@ mod tests {
             "lin_api_x",
             "memory keeps them"
         );
+    }
+
+    #[test]
+    fn older_accounts_default_to_profiles() {
+        let a: AwsAccount = serde_json::from_str(r#"{"profile":"apollo-prod"}"#).unwrap();
+        assert_eq!(a.auth, AwsAuth::Profile);
+        assert!(a.include.is_empty());
+        let k: AwsAccount = serde_json::from_str(
+            r#"{"auth":{"type":"access_key","access_key_id":"AKIAIOSFODNN7EXAMPLE"},"region":"eu-west-2"}"#,
+        )
+        .unwrap();
+        let mut c = Config::default();
+        c.cloudwatch.accounts = vec![k.clone(), k];
+        assert_eq!(c.access_key_ids(), ["AKIAIOSFODNN7EXAMPLE"]);
+        assert!(c.validate().is_ok());
+        c.sqs.auth = AwsAuth::AccessKey {
+            access_key_id: "nope".into(),
+        };
+        assert!(c.validate().unwrap_err().contains("nope"));
     }
 
     #[test]
