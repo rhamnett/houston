@@ -35,7 +35,7 @@ pub fn init() {
         unsafe {
             libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
         }
-        line(&format!("started {}", env!("CARGO_PKG_VERSION")));
+        line(&format!("started {}", crate::VERSION));
     }
 }
 

@@ -1,0 +1,35 @@
+name: Conventional
+
+# PRs squash-merge with their title as the commit message, and releases are
+# versioned from those messages (scripts/conventional.sh), so the title must be
+# a Conventional Commit header: <type>[(scope)][!]: <description>.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: conventional-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Versioning rules
+        run: scripts/conventional_test.sh
+      - name: PR title
+        # Through the environment, never ${{ }} in the script: a title is
+        # untrusted input and could otherwise inject shell.
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          scripts/conventional.sh title "$TITLE" "$BODY"
+          echo "Merging this releases: $(printf '%s\0' "$TITLE" | scripts/conventional.sh bump)"

@@ -271,10 +271,7 @@ fn handle(req: &Request, token: &str, rules: &[AlarmRule], sink: &Sink) -> (u16,
         );
     }
     if req.method == "GET" && req.path == "/v1/health" {
-        return (
-            200,
-            Some(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})),
-        );
+        return (200, Some(json!({"ok": true, "version": crate::VERSION})));
     }
     if !req.bearer.as_deref().is_some_and(|b| same_token(b, token)) {
         return (401, Some(json!({"error": "missing or wrong bearer token"})));

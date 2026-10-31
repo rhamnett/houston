@@ -234,7 +234,7 @@ pub fn handle(body: &[u8], run: impl FnOnce(Command) -> Result<Value, String>) -
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": "houston", "title": "Houston",
-                        "version": env!("CARGO_PKG_VERSION") },
+                        "version": crate::VERSION },
                     "instructions": INSTRUCTIONS,
                 }),
             )
