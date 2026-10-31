@@ -21,6 +21,10 @@ mod source;
 mod sources;
 mod store;
 
+/// From the release tag or `git describe` (build.rs), e.g. `0.3.0` or
+/// `0.3.0+2.gabc1234`.
+pub const VERSION: &str = env!("HOUSTON_VERSION");
+
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -845,9 +849,11 @@ fn install_edit_menu() -> Menu {
 }
 
 fn main() {
-    // `houston mcp`: the stdio MCP bridge for agents, not the app.
-    if std::env::args().nth(1).as_deref() == Some("mcp") {
-        std::process::exit(mcp::stdio_bridge());
+    match std::env::args().nth(1).as_deref() {
+        // The stdio MCP bridge for agents, not the app.
+        Some("mcp") => std::process::exit(mcp::stdio_bridge()),
+        Some("--version" | "-V") => return println!("houston {VERSION}"),
+        _ => {}
     }
     log::init();
     let config = Config::load();

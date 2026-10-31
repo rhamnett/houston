@@ -297,7 +297,7 @@ impl App {
                 }
                 Ok(json!({
                     "checking": true,
-                    "current": env!("CARGO_PKG_VERSION"),
+                    "current": crate::VERSION,
                     "note": "The answer arrives as an island with key \"update\" from source \"updates\".",
                 }))
             }

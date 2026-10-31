@@ -464,16 +464,31 @@ status line says so and nothing else happens.
 
 ### Releasing
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, the tests and the
-end-to-end tests on every push to main and every pull request. To publish,
-bump `version` in `Cargo.toml`, commit, and push a matching tag:
+Releases are automatic. Pull requests squash-merge with their title as the
+commit message, titles must be [Conventional
+Commits](https://www.conventionalcommits.org) (the `pr-title` check), and
+every merge to `main` works out the next [semantic
+version](https://semver.org) from the commits since the last `v*` tag:
 
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
+| PR title | Release |
+| --- | --- |
+| `fix: …`, `perf: …`, `revert: …` | patch: 0.3.0 → 0.3.1 |
+| `feat: …` | minor: 0.3.1 → 0.4.0 |
+| `feat!: …`, or a `BREAKING CHANGE:` line in the PR description | major: 1.4.0 → 2.0.0 (minor before 1.0) |
+| `docs`, `test`, `ci`, `build`, `chore`, `refactor`, `style` | none |
 
-`release.yml` checks the tag matches `Cargo.toml`, tests, builds the
-universal bundle and publishes a GitHub release with the zip and its SHA-256.
+A scope is optional: `fix(mcp): answer pings`. When there's something to
+release, `release.yml` tags the merge, builds the universal app and
+publishes a GitHub release with notes grouped from those titles; otherwise
+it stops after one quick Linux job. The version lives in the tag, not in
+`Cargo.toml` (whose `0.0.0` is a placeholder): `build.rs` stamps
+`HOUSTON_VERSION` from the release, or `git describe` for local builds,
+so `houston --version` says `0.3.0` on a release and `0.3.0+2.gabc1234` two
+commits past it. The rules live in `scripts/conventional.sh`
+(tests: `scripts/conventional_test.sh`).
+
+CI (`ci.yml`) runs fmt, clippy, the tests and the end-to-end tests on every
+pull request and push to `main`.
 
 ## Logs
 
@@ -518,13 +533,16 @@ New source? Add a module in `src/sources/`, implement `Source`, register it in
 
 ## Security and contributing
 
-`main` only changes through pull requests: squash-merged, with CI (`check`)
-and Trivy (`trivy`) passing; nobody can push to it, force-push or delete it.
+`main` only changes through pull requests: squash-merged, with a
+Conventional Commit title (`pr-title`), CI (`check`) and Trivy (`trivy`)
+passing; nobody can push to it, force-push or delete it.
 `v*` release tags can't be moved or deleted once pushed. Trivy scans for
 vulnerable dependencies, committed secrets and misconfigurations on every
 pull request, on `main` and weekly; accepted findings live in
 `.trivyignore.yaml` with a reason and an expiry. Dependabot keeps Cargo
-crates and the SHA-pinned actions current. To report a vulnerability, see
+crates and the SHA-pinned actions current, waiting until a release is two
+weeks old and titling its PRs `fix(deps)` (crates ship in the app) or
+`ci(deps)`. To report a vulnerability, see
 [SECURITY.md](SECURITY.md).
 
 ## Known limits

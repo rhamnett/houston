@@ -139,7 +139,7 @@ impl Updates {
             .get(&self.feed)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", concat!("houston/", env!("CARGO_PKG_VERSION")));
+            .header("User-Agent", &format!("houston/{}", crate::VERSION));
         let token = self.config.token.trim();
         if !token.is_empty() {
             request = request.header("Authorization", &format!("Bearer {token}"));
@@ -162,7 +162,7 @@ impl Updates {
     /// Check, returning the newer version if there is one. `manual`: someone
     /// asked, so say so even when there's nothing new.
     fn check(&self, sink: &Sink, manual: bool) -> Option<String> {
-        let current = env!("CARGO_PKG_VERSION");
+        let current = crate::VERSION;
         match self.latest() {
             Ok(release) if is_newer(&release.tag_name, current) => {
                 sink.status(format!("updates: {} available", release.tag_name));

@@ -1,6 +1,7 @@
 [package]
 name = "houston"
-version = "0.2.0"
+# A placeholder: the real version comes from git tags (see build.rs).
+version = "0.0.0"
 edition = "2024"
 rust-version = "1.88"
 

@@ -1,4 +1,10 @@
 # Weekly, one grouped PR per ecosystem: each PR runs macOS CI, which costs.
+# Matches the repository's rules, so its PRs pass without being touched:
+# - cooldown: nothing younger than 14 days, the age every pinned action was
+#   chosen at (tags have been hijacked before: GHSA-69fq-xp46-6x23)
+# - commit-message: Conventional Commit titles, which squash-merge onto main.
+#   Crates ship inside the app, so they're fix(deps) (a patch release);
+#   actions only touch CI, so they're ci(deps) (no release).
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -6,6 +12,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: fix
+      include: scope
     open-pull-requests-limit: 3
     groups:
       cargo:
@@ -15,6 +26,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: ci
+      include: scope
     open-pull-requests-limit: 2
     groups:
       actions:
