@@ -57,6 +57,24 @@ fn fake_release_feed(tag: &str) -> String {
     url
 }
 
+/// Kill `pid` after `secs` unless it has exited: a process stuck on a
+/// Keychain prompt fails the test instead of hanging it.
+fn watchdog(pid: u32, secs: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(secs));
+        // Only if that pid is still a houston: it may have exited and been reused.
+        let name = Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if name.ends_with("/houston") || name == "houston" {
+            eprintln!("watchdog: killing houston {pid} after {secs}s");
+            let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+        }
+    });
+}
+
 fn security(args: &[&str]) -> bool {
     Command::new("/usr/bin/security")
         .args(args)
@@ -120,6 +138,7 @@ impl Sandbox {
             .stderr(Stdio::null())
             .spawn()
             .expect("launch houston");
+        watchdog(app.id(), 90);
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(30)))
             .http_status_as_error(false)
@@ -277,6 +296,7 @@ impl Sandbox {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("houston mcp");
+        watchdog(bridge.id(), 20);
         let mut stdin = bridge.stdin.take().unwrap();
         for line in lines {
             writeln!(stdin, "{line}").unwrap();
@@ -287,7 +307,10 @@ impl Sandbox {
             .lines()
             .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
             .collect();
-        assert!(bridge.wait().unwrap().success());
+        assert!(
+            bridge.wait().unwrap().success(),
+            "the bridge failed or was killed by the watchdog"
+        );
         replies
     }
 }
@@ -605,6 +628,7 @@ fn bridge_explains_when_houston_is_not_running() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
+    watchdog(bridge.id(), 20);
     let mut stdin = bridge.stdin.take().unwrap();
     writeln!(
         stdin,
