@@ -175,7 +175,8 @@ pub fn tools() -> Vec<Value> {
             "Show an island, or update it (same key). Fields: key, title (required), subtitle, \
              body, icon (emoji), severity (info|success|warning|critical), compact, sticky, \
              ttl_secs (default 15), silent, revision, fields: [{label, value}], actions: [{id, \
-             label, role?: default|primary|destructive, url?, snooze_mins?}], kind: {type: \
+             label, role?: default|primary|destructive, url?, snooze_mins?}] (pressing one without \
+             a url dismisses the island), kind: {type: \
              \"message\", sender?} | {type: \"alert\", from?, to} | {type: \"progress\", value: \
              0-1} | {type: \"metric\", value, unit?, threshold?, series?: [numbers]} | {type: \
              \"timer\", started_at: unix ms}.",

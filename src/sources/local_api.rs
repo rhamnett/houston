@@ -393,9 +393,11 @@ impl Source for LocalApi {
         };
         for msg in inbox {
             match msg {
-                // Islands posted here have no one to call back; log custom actions.
+                // Islands posted here have no one to call back, so a button
+                // (Acknowledge, Resolve, ...) answers the island: it goes.
                 Inbound::Action { key, action } => {
                     crate::log::line(&format!("api: action {action} on {key}"));
+                    sink.remove(&key);
                 }
                 Inbound::Rules(new) => {
                     if let Ok(mut r) = rules.write() {
@@ -703,6 +705,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(api.call("GET", "/v1/health", &[], "").0, 200, "same server");
+    }
+
+    #[test]
+    fn a_button_press_removes_the_island() {
+        let api = Server::start();
+        api.inbox
+            .as_ref()
+            .unwrap()
+            .send(Inbound::Action {
+                key: "deploy".into(),
+                action: "ack".into(),
+            })
+            .unwrap();
+        assert!(matches!(api.next_event(), SourceEvent::Remove(k) if k == "deploy"));
     }
 
     #[test]
