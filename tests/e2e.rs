@@ -496,14 +496,18 @@ fn full_mission_over_mcp_and_rest() {
     h.wait_for_islands(&["api/one"]);
     let status = h.ok("get_status", json!({}));
     assert_eq!(status["islands"][0]["island"]["title"], "e2e one");
-    assert_eq!(
-        h.ok("press_button", json!({"id": "api/one", "action": "ack"}))["pressed"],
-        "ack"
-    );
     assert!(
         h.err("press_button", json!({"id": "api/one", "action": "launch"}))
             .contains("no launch button")
     );
+    // Nobody calls an API island back, so a press answers it: it goes.
+    assert_eq!(
+        h.ok("press_button", json!({"id": "api/one", "action": "ack"}))["pressed"],
+        "ack"
+    );
+    h.wait_for_islands(&[]);
+    h.ok("post_island", island("one"));
+    h.wait_for_islands(&["api/one"]);
     h.ok("dismiss_island", json!({"id": "api/one"}));
     h.wait_for_islands(&[]);
     assert!(

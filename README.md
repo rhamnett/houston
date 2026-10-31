@@ -151,7 +151,7 @@ body:
 Common fields: `key` (posting the same key again updates in place), `title`,
 `subtitle`, `body`, `icon` (an emoji), `severity` (`success` `info` `warning`
 `critical`), `compact`, `fields` (label/value rows), `actions` (up to 3
-buttons), `sticky` (stays until dismissed), `ttl_secs` (default 15),
+buttons; one without a `url` dismisses the island when pressed), `sticky` (stays until dismissed), `ttl_secs` (default 15),
 `revision` and `silent`.
 
 - **Actions**: `dismiss` and `snooze` (with `snooze_mins`) are handled by the
