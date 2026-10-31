@@ -3,6 +3,8 @@
 #   houston "Build finished" "web · main · 4m12s" success
 #   houston --json '{"key":"deploy","title":"Deploying","kind":{"type":"progress","value":0.4}}'
 #   houston --remove deploy
+#   pbpaste | houston --secret aws-secret:AKIA…     # value on stdin, never on the command line
+#   houston --forget-secret aws-secret:AKIA…
 # Severity: success | info | warning | critical. HOUSTON_KEY overrides the key.
 set -euo pipefail
 CONFIG="$HOME/Library/Application Support/houston/config.json"
@@ -10,13 +12,22 @@ PORT=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).
 # The token lives in the login Keychain, not the config file.
 TOKEN=$(/usr/bin/security find-generic-password -s local.houston -a api-token -w 2>/dev/null) || {
   echo "houston: no API token in the Keychain; launch Houston once first" >&2; exit 1; }
-URL="http://127.0.0.1:$PORT/v1/islands"
+BASE="http://127.0.0.1:$PORT/v1"
+URL="$BASE/islands"
 auth=(-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
+encode() { /usr/bin/python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 
 case "${1:-}" in
   --json) exec curl -fsS -X POST "${auth[@]}" --data "$2" "$URL" ;;
-  --remove) exec curl -fsS -X DELETE "${auth[@]}" "$URL/$(/usr/bin/python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$2")" ;;
-  ""|-h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+  --remove) exec curl -fsS -X DELETE "${auth[@]}" "$URL/$(encode "$2")" ;;
+  # Houston writes the Keychain item itself, so it owns it and never has to ask
+  # to read it. The value is read from stdin and sent as JSON, never passed as
+  # an argument where `ps` and shell history would show it.
+  --secret)
+    body=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps({"value": sys.stdin.read().rstrip("\r\n")}))')
+    exec curl -fsS -X PUT "${auth[@]}" --data "$body" "$BASE/secrets/$(encode "$2")" ;;
+  --forget-secret) exec curl -fsS -X DELETE "${auth[@]}" "$BASE/secrets/$(encode "$2")" ;;
+  ""|-h|--help) sed -n '2,8p' "$0"; exit 0 ;;
 esac
 
 body=$(/usr/bin/python3 - "$@" <<'PY'
