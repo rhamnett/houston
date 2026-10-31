@@ -291,13 +291,21 @@ pub fn random_token() -> String {
 }
 
 impl Config {
+    /// `HOUSTON_DATA_DIR` moves it, for a sandboxed instance (the end-to-end
+    /// tests). HOME stays put: macOS finds the login Keychain through it.
     pub fn dir() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("HOUSTON_DATA_DIR").filter(|d| !d.is_empty()) {
+            return Some(PathBuf::from(dir));
+        }
         let home = std::env::var_os("HOME")?;
         Some(PathBuf::from(home).join("Library/Application Support/houston"))
     }
 
     /// The app was called notch-tray; move its folder over once, keeping the token.
     fn migrate_old_dir() {
+        if std::env::var_os("HOUSTON_DATA_DIR").is_some() {
+            return;
+        }
         let (Some(home), Some(new)) = (std::env::var_os("HOME"), Self::dir()) else {
             return;
         };

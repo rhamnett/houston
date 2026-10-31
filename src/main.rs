@@ -6,10 +6,12 @@
 
 mod aws;
 mod config;
+mod control;
 mod focus;
 mod icon;
 mod island;
 mod log;
+mod mcp;
 mod notch;
 mod notify;
 mod overlay;
@@ -57,6 +59,11 @@ pub enum UserEvent {
     Menu(MenuEvent),
     /// The pointer moved onto the island.
     HoverEnter,
+    /// From the local API or MCP: do this and answer on `reply`.
+    Control {
+        command: control::Command,
+        reply: control::Reply,
+    },
 }
 
 /// How often to check the pointer while the island is open.
@@ -428,24 +435,28 @@ impl App {
         }
     }
 
+    fn secret_flags(&self) -> SecretFlags {
+        SecretFlags {
+            api_token: !self.config.api.token.is_empty(),
+            linear_api_key: !self.config.linear.api_key.is_empty(),
+            aws: self
+                .config
+                .access_key_ids()
+                .into_iter()
+                .map(|id| {
+                    let set = secrets::get_aws_secret(&id).is_some();
+                    (id, set)
+                })
+                .collect(),
+        }
+    }
+
     fn prefs_state(&self, reset: bool) -> Value {
         json!({
             "type": "state",
             "reset": reset,
             "config": self.config.without_secrets(),
-            "secrets": SecretFlags {
-                api_token: !self.config.api.token.is_empty(),
-                linear_api_key: !self.config.linear.api_key.is_empty(),
-                aws: self
-                    .config
-                    .access_key_ids()
-                    .into_iter()
-                    .map(|id| {
-                        let set = secrets::get_aws_secret(&id).is_some();
-                        (id, set)
-                    })
-                    .collect(),
-            },
+            "secrets": self.secret_flags(),
             "profiles": aws::profiles(),
             "focus": match &self.focus {
                 focus::Focus::On(name) => format!("{name} is on now"),
@@ -578,15 +589,16 @@ impl App {
         self.render();
     }
 
-    /// Validate and save a config from Preferences, store changed secrets in
-    /// the Keychain and restart the sources whose settings changed.
+    /// Validate and save a config from Preferences (or the remote control),
+    /// store changed secrets in the Keychain and restart the sources whose
+    /// settings changed.
     fn apply_prefs(
         &mut self,
         value: Value,
         secret_edits: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<String>, String> {
-        let mut next: Config =
-            serde_json::from_value(value).map_err(|e| format!("Couldn't read the form: {e}"))?;
+        let mut next: Config = serde_json::from_value(value)
+            .map_err(|e| format!("Couldn't read the settings: {e}"))?;
         next.keep_secrets(&self.config);
         next.validate()?;
         let key_ids = next.access_key_ids();
@@ -617,6 +629,7 @@ impl App {
             .copied()
             .filter(|id| sources::fingerprint(id, &self.config) != sources::fingerprint(id, &next))
             .collect();
+        let rules_changed = next.alarm_rules != self.config.alarm_rules;
         let dnd = next.do_not_disturb;
         self.config = next;
         self.config.save()?;
@@ -625,6 +638,15 @@ impl App {
         self.check_focus();
         self.items.focus.set_text(self.focus_label());
         self.restart_sources(&changed);
+        if rules_changed {
+            for id in sources::LIVE_RULES
+                .iter()
+                .filter(|id| !changed.contains(id))
+            {
+                self.registry
+                    .send(id, Inbound::Rules(self.config.alarm_rules.clone()));
+            }
+        }
         Ok(changed.iter().map(|s| s.to_string()).collect())
     }
 
@@ -798,6 +820,10 @@ fn install_edit_menu() -> Menu {
 }
 
 fn main() {
+    // `houston mcp`: the stdio MCP bridge for agents, not the app.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        std::process::exit(mcp::stdio_bridge());
+    }
     log::init();
     let config = Config::load();
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -901,6 +927,9 @@ fn main() {
                 ..
             } if app.prefs.as_ref().is_some_and(|p| p.id() == window_id) => app.prefs = None,
             Event::UserEvent(UserEvent::HoverEnter) => app.hover_enter(),
+            Event::UserEvent(UserEvent::Control { command, reply }) => {
+                app.on_control(command, reply)
+            }
             Event::NewEvents(StartCause::Init) => app.render(),
             _ => {}
         }

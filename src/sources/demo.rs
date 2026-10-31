@@ -294,6 +294,7 @@ impl Source for Demo {
             match inbox.recv_timeout(wait) {
                 Ok(Inbound::Trigger(t)) => demo.trigger(&t),
                 Ok(Inbound::Action { key, action }) => demo.on_action(&key, &action, &sink),
+                Ok(Inbound::Rules(_)) => {}
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }

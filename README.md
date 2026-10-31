@@ -210,6 +210,62 @@ Mission settings, puts it on the clipboard, and Regenerate replaces it.
 - `POST /v1/aws/alarm`: an EventBridge or SNS CloudWatch alarm payload, or a
   Security Hub findings event
 
+Settings and remote control, the same things Mission settings and the menu do:
+
+- `GET /v1/settings` (secrets blanked, plus which are set); `PATCH /v1/settings`
+  with a [JSON merge patch](https://www.rfc-editor.org/rfc/rfc7396): send only
+  what changes, `null` resets a key, arrays are replaced whole. It is
+  validated, saved and applied like a Save, restarting only the affected
+  sources.
+- `PUT /v1/secrets/{name}` with `{"value": "…"}`, `DELETE /v1/secrets/{name}`:
+  `linear-api-key`, or `aws-secret:<access key id>`. Secrets go to the Keychain
+  and are never returned. The API token itself can only be regenerated in
+  Mission settings.
+- `GET /v1/status`: the board, radio silence, Focus, sources and their status
+- `PUT /v1/radio-silence` with `{"on": true}`; `POST /v1/board/clear`,
+  `/v1/board/dismiss` `{"id"}`, `/v1/board/press` `{"id", "action"}`
+- `POST /v1/drills/{trigger}`, `/v1/cloudwatch/accounts/{i}/test`,
+  `/v1/cloudwatch/accounts/{i}/discover`, `/v1/linear/test`,
+  `/v1/alarm-rules/test` `{"name"}`; `GET /v1/aws/profiles`
+- `POST /v1/commands/{tool}`: any MCP tool below, with its arguments as the body
+
+```bash
+TOKEN=$(security find-generic-password -s local.houston -a api-token -w)
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -d '{"sounds": false}' http://127.0.0.1:7878/v1/settings
+```
+
+Requests from a web page (an `Origin` other than localhost) are refused, so a
+site can't reach the API through your browser.
+
+### MCP: let an agent fly it
+
+Houston is also an [MCP](https://modelcontextprotocol.io) server, so Claude
+or another agent can read and change every setting, store secrets, run checks
+and drills, and post or clear islands. Tools: `get_settings`,
+`update_settings`, `set_secret`, `list_aws_profiles`, `get_status`,
+`set_radio_silence`, `clear_board`, `dismiss_island`, `press_button`,
+`run_drill`, `test_cloudwatch`, `discover_alarms`, `test_linear`,
+`test_alarm_rule`, `post_island`, `remove_island`.
+
+Over HTTP, at `/mcp` on the local API with the same token (Claude Code):
+
+```bash
+claude mcp add --transport http houston http://127.0.0.1:7878/mcp \
+  --header "Authorization: Bearer $(security find-generic-password -s local.houston -a api-token -w)"
+```
+
+Or over stdio, for clients that launch a command (Claude Desktop's
+`claude_desktop_config.json`). `houston mcp` reads the token from the Keychain
+and relays to the running app:
+
+```json
+{ "mcpServers": { "houston": {
+  "command": "/Applications/Houston.app/Contents/MacOS/houston", "args": ["mcp"] } } }
+```
+
+Both need Houston running with the local API on. Turning the API off, or
+changing its port, through MCP cuts the agent off too.
+
 ### CloudWatch, polling
 
 In `~/Library/Application Support/houston/config.json`:
@@ -377,6 +433,8 @@ the terminal otherwise.
 - `src/overlay.rs`: the overlay window and the island page (HTML/CSS/JS)
 - `src/notch.rs`: notch geometry, window level and Spaces, the hover monitor
 - `src/prefs.rs`: the Mission settings window and its page
+- `src/control.rs`: remote-control commands for the API and MCP
+- `src/mcp.rs`: the MCP tools, JSON-RPC handling and the stdio bridge
 - `src/secrets.rs`: Keychain storage for the API token and the Linear key
 - `src/focus.rs`: following macOS Focus via the Do Not Disturb store
 - `src/config.rs`, `src/icon.rs`, `src/notify.rs`, `src/log.rs`
@@ -384,11 +442,17 @@ the terminal otherwise.
 ## Development
 
 ```bash
-cargo test                    # mappers, store, rules, config
+cargo test                    # mappers, store, rules, config, the API and MCP over TCP
+cargo test --test e2e -- --ignored   # a sandboxed Houston, flown over MCP and REST
 cargo test -- --ignored       # also hits live APIs (Linear auth check)
 cargo clippy --all-targets    # kept warning-free
 cargo fmt
 ```
+
+The end-to-end tests launch a second Houston with its own data folder
+(`HOUSTON_DATA_DIR`), Keychain service (`HOUSTON_KEYCHAIN_SERVICE`) and port,
+so they never touch your settings or secrets. It shows a menu bar icon for
+the few seconds it runs.
 
 New source? Add a module in `src/sources/`, implement `Source`, register it in
 `sources::from_config` and give it a config block in `src/config.rs`.

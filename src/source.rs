@@ -9,10 +9,15 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
+
+use serde_json::Value;
 
 use tao::event_loop::EventLoopProxy;
 
 use crate::UserEvent;
+use crate::config::AlarmRule;
+use crate::control::Command;
 use crate::island::Island;
 
 #[derive(Debug)]
@@ -30,6 +35,28 @@ pub enum Inbound {
     Action { key: String, action: String },
     /// A named trigger from the menu or the panel (used by the demo).
     Trigger(String),
+    /// New alarm rules, for a source that applies them without a restart
+    /// (the local API, so an agent changing rules keeps its connection).
+    Rules(Vec<AlarmRule>),
+}
+
+/// The app's event loop, or a channel standing in for it in tests.
+#[derive(Clone)]
+enum Outlet {
+    App(EventLoopProxy<UserEvent>),
+    #[cfg(test)]
+    Channel(Sender<UserEvent>),
+}
+
+impl Outlet {
+    /// False once the app (or test) has gone.
+    fn send(&self, event: UserEvent) -> bool {
+        match self {
+            Outlet::App(proxy) => proxy.send_event(event).is_ok(),
+            #[cfg(test)]
+            Outlet::Channel(tx) => tx.send(event).is_ok(),
+        }
+    }
 }
 
 /// Where a source sends its islands. Cheap to clone across threads.
@@ -37,12 +64,24 @@ pub enum Inbound {
 pub struct Sink {
     source: String,
     generation: u64,
-    proxy: EventLoopProxy<UserEvent>,
+    outlet: Outlet,
 }
 
 impl Sink {
+    /// A sink whose events arrive on the returned receiver.
+    #[cfg(test)]
+    pub fn channel(source: &str) -> (Self, Receiver<UserEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let sink = Self {
+            source: source.into(),
+            generation: 1,
+            outlet: Outlet::Channel(tx),
+        };
+        (sink, rx)
+    }
+
     fn send(&self, event: SourceEvent) {
-        let _ = self.proxy.send_event(UserEvent::Source {
+        self.outlet.send(UserEvent::Source {
             source: self.source.clone(),
             generation: self.generation,
             event,
@@ -60,6 +99,18 @@ impl Sink {
 
     pub fn status(&self, msg: impl Into<String>) {
         self.send(SourceEvent::Status(msg.into()));
+    }
+
+    /// Have the app carry out `command` and wait for its answer (the local
+    /// API's remote control). Checks against AWS can take a while.
+    pub fn request(&self, command: Command) -> Result<Value, String> {
+        let (reply, answer) = mpsc::channel();
+        if !self.outlet.send(UserEvent::Control { command, reply }) {
+            return Err("Houston is shutting down.".into());
+        }
+        answer
+            .recv_timeout(Duration::from_secs(120))
+            .map_err(|_| "Houston didn't answer in time.".to_string())?
     }
 }
 
@@ -99,7 +150,7 @@ impl Registry {
         let sink = Sink {
             source: id.clone(),
             generation,
-            proxy: self.proxy.clone(),
+            outlet: Outlet::App(self.proxy.clone()),
         };
         let spawned = std::thread::Builder::new()
             .name(format!("source:{id}"))

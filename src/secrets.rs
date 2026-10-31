@@ -8,6 +8,15 @@ use security_framework::passwords::{
 };
 
 pub const SERVICE: &str = "local.houston";
+
+/// `HOUSTON_KEYCHAIN_SERVICE` swaps the service, so a sandboxed instance (the
+/// end-to-end tests) never touches the real secrets.
+fn service() -> String {
+    std::env::var("HOUSTON_KEYCHAIN_SERVICE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| SERVICE.to_string())
+}
 /// errSecItemNotFound.
 const NOT_FOUND: i32 = -25300;
 
@@ -65,7 +74,7 @@ pub fn set_aws_secret(access_key_id: &str, value: &str) -> Result<(), String> {
 }
 
 fn get_raw(account: &str) -> Option<String> {
-    match get_generic_password(SERVICE, account) {
+    match get_generic_password(&service(), account) {
         Ok(bytes) => String::from_utf8(bytes).ok().filter(|s| !s.is_empty()),
         Err(e) => {
             if e.code() != NOT_FOUND {
@@ -78,12 +87,12 @@ fn get_raw(account: &str) -> Option<String> {
 
 fn set_raw(account: &str, value: &str) -> Result<(), String> {
     let result = if value.is_empty() {
-        match delete_generic_password(SERVICE, account) {
+        match delete_generic_password(&service(), account) {
             Err(e) if e.code() == NOT_FOUND => Ok(()),
             other => other,
         }
     } else {
-        set_generic_password(SERVICE, account, value.as_bytes())
+        set_generic_password(&service(), account, value.as_bytes())
     };
     result.map_err(|e| format!("keychain {account}: {e}"))
 }

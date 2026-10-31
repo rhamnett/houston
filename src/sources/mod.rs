@@ -22,6 +22,9 @@ pub use linear::probe as probe_linear;
 /// setting takes effect at the next launch.
 pub const RESTARTABLE: &[&str] = &["api", "cloudwatch", "sqs", "linear", "iot"];
 
+/// Sources that apply alarm rules sent as `Inbound::Rules`.
+pub const LIVE_RULES: &[&str] = &["api"];
+
 /// The source called `id` for this configuration, or `None` if it is off.
 pub fn build(id: &str, config: &Config) -> Option<Box<dyn Source>> {
     let rules = || config.alarm_rules.clone();
@@ -51,10 +54,11 @@ pub fn build(id: &str, config: &Config) -> Option<Box<dyn Source>> {
 }
 
 /// Everything source `id` reads from the config. When it changes, the source
-/// is restarted.
+/// is restarted. The local API takes new alarm rules live instead (see
+/// [`LIVE_RULES`]), so changing them doesn't drop its connections.
 pub fn fingerprint(id: &str, config: &Config) -> String {
     let value = match id {
-        "api" => json!([config.api, config.alarm_rules]),
+        "api" => json!(config.api),
         "cloudwatch" => json!([config.cloudwatch, config.alarm_rules, config.aws_cli]),
         "sqs" => json!([config.sqs, config.alarm_rules, config.aws_cli]),
         "linear" => json!(config.linear),
@@ -94,7 +98,7 @@ mod tests {
             .copied()
             .filter(|id| fingerprint(id, &a) != fingerprint(id, &c))
             .collect();
-        assert_eq!(changed, ["api", "cloudwatch", "sqs"]);
+        assert_eq!(changed, ["cloudwatch", "sqs"], "the API takes rules live");
     }
 
     #[test]

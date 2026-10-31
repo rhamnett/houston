@@ -11,6 +11,10 @@ use std::path::PathBuf;
 const MAX_BYTES: u64 = 1_000_000;
 
 fn path() -> Option<PathBuf> {
+    // A sandboxed instance logs into its own data folder.
+    if let Some(dir) = std::env::var_os("HOUSTON_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir).join("houston.log"));
+    }
     Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/houston.log"))
 }
 
