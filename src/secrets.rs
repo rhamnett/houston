@@ -76,7 +76,36 @@ pub fn set_aws_secret(access_key_id: &str, value: &str) -> Result<(), String> {
     set_raw(&aws_secret_account(access_key_id), value)
 }
 
+/// `HOUSTON_INSECURE_SECRETS_FILE`: keep secrets in this JSON file (mode
+/// 600) instead of the Keychain. Only for CI runners, whose Keychain can't be
+/// used unattended; never for real use.
+fn insecure_file() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOUSTON_INSECURE_SECRETS_FILE")
+        .filter(|p| !p.is_empty())
+        .map(Into::into)
+}
+
+type FileStore = std::collections::BTreeMap<String, String>;
+
+fn read_file(path: &std::path::Path) -> FileStore {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_file(path: &std::path::Path, store: &FileStore) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let json = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 fn get_raw(account: &str) -> Option<String> {
+    if let Some(path) = insecure_file() {
+        return read_file(&path).remove(account).filter(|s| !s.is_empty());
+    }
     match get_generic_password(&service(), account) {
         Ok(bytes) => String::from_utf8(bytes).ok().filter(|s| !s.is_empty()),
         Err(e) => {
@@ -89,6 +118,15 @@ fn get_raw(account: &str) -> Option<String> {
 }
 
 fn set_raw(account: &str, value: &str) -> Result<(), String> {
+    if let Some(path) = insecure_file() {
+        let mut store = read_file(&path);
+        if value.is_empty() {
+            store.remove(account);
+        } else {
+            store.insert(account.to_string(), value.to_string());
+        }
+        return write_file(&path, &store);
+    }
     let result = if value.is_empty() {
         match delete_generic_password(&service(), account) {
             Err(e) if e.code() == NOT_FOUND => Ok(()),

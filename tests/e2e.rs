@@ -3,7 +3,9 @@
 //!
 //! The sandbox has its own data folder (`HOUSTON_DATA_DIR`: config.json and
 //! log), its own Keychain service and a spare port, so your settings and
-//! secrets are never touched. HOME is left alone: macOS finds the login
+//! secrets are never touched. Under CI (`CI` set) it keeps secrets in a file
+//! in that folder instead (`HOUSTON_INSECURE_SECRETS_FILE`): a runner's
+//! Keychain can't be used unattended. HOME is left alone: macOS finds the login
 //! Keychain through it. It needs a logged-in macOS session (the app puts an overlay and a
 //! menu bar icon up while it runs), so it is ignored by default:
 //!
@@ -84,9 +86,74 @@ fn security(args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Where a sandbox keeps its secrets: a Keychain service of its own on a
+/// Mac, or a file under CI (`CI` is set), whose Keychain can't be used
+/// unattended.
+struct Secrets {
+    service: String,
+    file: Option<PathBuf>,
+}
+
+impl Secrets {
+    /// Store the sandbox's API token where Houston will look.
+    fn seed(home: &std::path::Path, id: &str, token: &str) -> Self {
+        let service = format!("local.houston.e2e.{id}");
+        if std::env::var_os("CI").is_some() {
+            let file = home.join("secrets.json");
+            std::fs::write(&file, json!({ "api-token": token }).to_string()).unwrap();
+            return Self {
+                service,
+                file: Some(file),
+            };
+        }
+        // Made by `security` with -A so the app can read it without a prompt.
+        assert!(
+            security(&[
+                "add-generic-password",
+                "-s",
+                &service,
+                "-a",
+                "api-token",
+                "-w",
+                token,
+                "-A",
+                "-U",
+            ]),
+            "couldn't add the sandbox token to the Keychain"
+        );
+        Self {
+            service,
+            file: None,
+        }
+    }
+
+    fn apply<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+        cmd.env("HOUSTON_KEYCHAIN_SERVICE", &self.service);
+        if let Some(file) = &self.file {
+            cmd.env("HOUSTON_INSECURE_SECRETS_FILE", file);
+        }
+        cmd
+    }
+
+    fn forget(&self) {
+        if self.file.is_some() {
+            return; // goes with the data folder
+        }
+        for account in ["api-token", "linear-api-key", "github-token"] {
+            security(&[
+                "delete-generic-password",
+                "-s",
+                &self.service,
+                "-a",
+                account,
+            ]);
+        }
+    }
+}
+
 struct Sandbox {
     home: PathBuf,
-    service: String,
+    secrets: Secrets,
     token: String,
     port: u16,
     agent: ureq::Agent,
@@ -111,27 +178,12 @@ impl Sandbox {
             .to_string(),
         )
         .unwrap();
-        // Made by `security` with -A so the app can read it without a prompt.
-        let service = format!("local.houston.e2e.{id}");
         let token = format!("e2e-{id}-token");
-        assert!(
-            security(&[
-                "add-generic-password",
-                "-s",
-                &service,
-                "-a",
-                "api-token",
-                "-w",
-                &token,
-                "-A",
-                "-U",
-            ]),
-            "couldn't add the sandbox token to the Keychain"
-        );
-        let app = Command::new(BIN)
+        let secrets = Secrets::seed(&home, &id, &token);
+        let app = secrets
+            .apply(&mut Command::new(BIN))
             .env("HOUSTON_DATA_DIR", &home)
             .env("AWS_CONFIG_FILE", home.join("no-aws-config"))
-            .env("HOUSTON_KEYCHAIN_SERVICE", &service)
             .env("HOUSTON_UPDATE_URL", fake_release_feed("v99.0.0"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -146,7 +198,7 @@ impl Sandbox {
             .into();
         let sandbox = Self {
             home,
-            service,
+            secrets,
             token,
             port,
             agent,
@@ -287,10 +339,11 @@ impl Sandbox {
 
     /// Run `houston mcp` against the sandbox and send it `lines`; its replies.
     fn stdio(&self, lines: &[Value]) -> Vec<Value> {
-        let mut bridge = Command::new(BIN)
+        let mut bridge = self
+            .secrets
+            .apply(&mut Command::new(BIN))
             .arg("mcp")
             .env("HOUSTON_DATA_DIR", &self.home)
-            .env("HOUSTON_KEYCHAIN_SERVICE", &self.service)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -319,15 +372,7 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = self.app.kill();
         let _ = self.app.wait();
-        for account in ["api-token", "linear-api-key"] {
-            security(&[
-                "delete-generic-password",
-                "-s",
-                &self.service,
-                "-a",
-                account,
-            ]);
-        }
+        self.secrets.forget();
         let _ = std::fs::remove_dir_all(&self.home);
     }
 }
@@ -607,23 +652,11 @@ fn bridge_explains_when_houston_is_not_running() {
         json!({"api": {"port": port}}).to_string(),
     )
     .unwrap();
-    let service = format!("local.houston.e2e.{id}");
-    assert!(security(&[
-        "add-generic-password",
-        "-s",
-        &service,
-        "-a",
-        "api-token",
-        "-w",
-        "x",
-        "-A",
-        "-U",
-    ]));
-    let mut bridge = Command::new(BIN)
+    let secrets = Secrets::seed(&home, &id, "x");
+    let mut bridge = secrets
+        .apply(&mut Command::new(BIN))
         .arg("mcp")
         .env("HOUSTON_DATA_DIR", &home)
-        .env("AWS_CONFIG_FILE", home.join("no-aws-config"))
-        .env("HOUSTON_KEYCHAIN_SERVICE", &service)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -648,7 +681,7 @@ fn bridge_explains_when_houston_is_not_running() {
         .map(Result::unwrap)
         .collect();
     let _ = bridge.wait();
-    security(&["delete-generic-password", "-s", &service, "-a", "api-token"]);
+    secrets.forget();
     let _ = std::fs::remove_dir_all(&home);
     assert_eq!(lines.len(), 1, "{lines:?}");
     let v: Value = serde_json::from_str(&lines[0]).unwrap();
