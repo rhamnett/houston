@@ -53,6 +53,11 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(v)
 }
 
+/// Built without a release tag or `HOUSTON_VERSION` (see build.rs).
+pub fn is_unversioned(version: &str) -> bool {
+    version.starts_with("0.0.0-unversioned")
+}
+
 pub fn is_newer(tag: &str, current: &str) -> bool {
     match (parse_version(tag), parse_version(current)) {
         (Some(t), Some(c)) => t > c,
@@ -163,6 +168,21 @@ impl Updates {
     /// asked, so say so even when there's nothing new.
     fn check(&self, sink: &Sink, manual: bool) -> Option<String> {
         let current = crate::VERSION;
+        if is_unversioned(current) {
+            // Every release would look newer than 0.0.0: say why, offer nothing.
+            let why = "unversioned build (no release tag or HOUSTON_VERSION), so no update offers";
+            sink.status(format!("updates: {why}"));
+            if manual {
+                sink.upsert(
+                    Island::new(KEY, Kind::default(), "Can't compare versions")
+                        .subtitle(why)
+                        .icon("🧪")
+                        .severity(Severity::Warning)
+                        .ttl(15),
+                );
+            }
+            return None;
+        }
         match self.latest() {
             Ok(release) if is_newer(&release.tag_name, current) => {
                 sink.status(format!("updates: {} available", release.tag_name));
@@ -257,6 +277,8 @@ mod tests {
         assert!(!is_newer("v0.1.0", "0.1.0"));
         assert!(!is_newer("v0.0.9", "0.1.0"));
         assert!(!is_newer("nightly", "0.1.0"));
+        assert!(is_unversioned("0.0.0-unversioned"));
+        assert!(!is_unversioned("0.2.0+3.gabc1234") && !is_unversioned("0.0.1"));
     }
 
     #[test]

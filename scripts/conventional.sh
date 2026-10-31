@@ -3,7 +3,9 @@
 # NUL-separated (`git log -z --format=%B`); nothing here touches git or the
 # network, so scripts/conventional_test.sh can check it.
 #
-#   conventional.sh title "<PR title>"   exit 1 unless it's a conventional header
+#   conventional.sh title "<title>" [body]  exit 1 unless it's a conventional
+#                                         header, with `!` if the body has a
+#                                         BREAKING CHANGE footer
 #   conventional.sh bump                 major | minor | patch | none
 #   conventional.sh next <version>       the next version, or nothing
 #   conventional.sh notes                release notes in Markdown
@@ -101,10 +103,18 @@ notes() {
 
 case ${1:-} in
   title)
-    if [[ "${2:-}" =~ $HEADER ]]; then exit 0; fi
-    echo "Not a Conventional Commit header: ${2:-}" >&2
-    echo "Use <type>[(scope)][!]: <description>, type one of ${TYPES//|/, }." >&2
-    exit 1
+    if ! [[ "${2:-}" =~ $HEADER ]]; then
+      echo "Not a Conventional Commit header: ${2:-}" >&2
+      echo "Use <type>[(scope)][!]: <description>, type one of ${TYPES//|/, }." >&2
+      exit 1
+    fi
+    # The title alone must say it's breaking: a footer in the description only
+    # reaches main if the squash message keeps it.
+    if [[ -z "${BASH_REMATCH[3]}" && $'\n'"${3:-}" =~ $'\n'BREAKING[\ -]CHANGE: ]]; then
+      echo "The description has a BREAKING CHANGE footer, so the title needs a !: ${2}" >&2
+      echo "e.g. ${2/: /!: }" >&2
+      exit 1
+    fi
     ;;
   bump) bump ;;
   next) next "${2:?version}" ;;

@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
       - id: next
         run: |
-          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo v0.0.0)
+          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || echo v0.0.0)
           range=$([ "$last" = v0.0.0 ] && echo HEAD || echo "$last..HEAD")
           version=$(git log -z --format=%B "$range" | scripts/conventional.sh next "$last")
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -68,7 +68,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo v0.0.0)
+          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || echo v0.0.0)
           range=$([ "$last" = v0.0.0 ] && echo HEAD || echo "$last..HEAD")
           {
             git log -z --format=%B "$range" | scripts/conventional.sh notes

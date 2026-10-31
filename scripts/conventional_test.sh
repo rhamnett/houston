@@ -16,7 +16,7 @@ check() { # name expected actual
 # NUL-separated messages, as `git log -z --format=%B` writes them.
 msgs() { printf '%s\0' "$@"; }
 
-title_ok() { ./conventional.sh title "$1" 2>/dev/null && echo yes || echo no; }
+title_ok() { ./conventional.sh title "$1" "${2:-}" 2>/dev/null && echo yes || echo no; }
 
 check "feat title" yes "$(title_ok 'feat: watch list')"
 check "scoped title" yes "$(title_ok 'fix(mcp): answer pings')"
@@ -27,6 +27,10 @@ check "unknown type" no "$(title_ok 'feature: x')"
 check "capital type" no "$(title_ok 'Feat: x')"
 check "no space" no "$(title_ok 'fix:x')"
 check "empty description" no "$(title_ok 'fix: ')"
+check "breaking body, no bang" no "$(title_ok 'feat: new ports' $'Moves things.\n\nBREAKING CHANGE: port 7878 is gone')"
+check "breaking body, bang" yes "$(title_ok 'feat!: new ports' $'BREAKING CHANGE: port 7878 is gone')"
+check "breaking body, scoped bang" yes "$(title_ok 'feat(api)!: new ports' $'x\nBREAKING-CHANGE: gone')"
+check "breaking only in prose" yes "$(title_ok 'fix: y' 'this is not a BREAKING CHANGE: really')"
 
 check "only chores" none "$(msgs 'chore: tidy' 'docs: readme' 'ci: cache' | ./conventional.sh bump)"
 check "fix" patch "$(msgs 'docs: x' 'fix: y' | ./conventional.sh bump)"

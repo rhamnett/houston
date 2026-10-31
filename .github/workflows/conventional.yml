@@ -29,6 +29,7 @@ jobs:
         # untrusted input and could otherwise inject shell.
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
         run: |
-          scripts/conventional.sh title "$TITLE"
+          scripts/conventional.sh title "$TITLE" "$BODY"
           echo "Merging this releases: $(printf '%s\0' "$TITLE" | scripts/conventional.sh bump)"

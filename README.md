@@ -474,10 +474,13 @@ version](https://semver.org) from the commits since the last `v*` tag:
 | --- | --- |
 | `fix: …`, `perf: …`, `revert: …` | patch: 0.3.0 → 0.3.1 |
 | `feat: …` | minor: 0.3.1 → 0.4.0 |
-| `feat!: …`, or a `BREAKING CHANGE:` line in the PR description | major: 1.4.0 → 2.0.0 (minor before 1.0) |
+| `feat!: …` (any type with `!`) | major: 1.4.0 → 2.0.0 (minor before 1.0) |
 | `docs`, `test`, `ci`, `build`, `chore`, `refactor`, `style` | none |
 
-A scope is optional: `fix(mcp): answer pings`. When there's something to
+A scope is optional: `fix(mcp): answer pings`. A breaking change needs the
+`!` in the title; a `BREAKING CHANGE:` footer in the description is welcome
+for the explanation, but `pr-title` fails if it's there without the `!`, so
+the title alone decides the version. When there's something to
 release, `release.yml` tags the merge, builds the universal app and
 publishes a GitHub release with notes grouped from those titles; otherwise
 it stops after one quick Linux job. The version lives in the tag, not in
