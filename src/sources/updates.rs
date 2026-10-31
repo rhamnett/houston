@@ -29,8 +29,6 @@ pub struct Release {
     pub tag_name: String,
     pub html_url: String,
     #[serde(default)]
-    pub body: Option<String>,
-    #[serde(default)]
     pub assets: Vec<Asset>,
 }
 
@@ -72,17 +70,8 @@ impl Release {
     }
 
     pub fn island(&self, current: &str) -> Island {
+        // The notes open behind What's new: they start with install steps.
         let version = self.tag_name.trim_start_matches('v');
-        let notes = self
-            .body
-            .as_deref()
-            .unwrap_or_default()
-            .lines()
-            .map(|l| l.trim().trim_start_matches(['#', '-', '*', ' ']))
-            .filter(|l| !l.is_empty())
-            .take(3)
-            .collect::<Vec<_>>()
-            .join(" · ");
         let mut island = Island::new(
             KEY,
             Kind::Message {
@@ -96,9 +85,6 @@ impl Release {
         .compact(format!("v{version}"))
         .revision(self.tag_name.clone())
         .sticky();
-        if !notes.is_empty() {
-            island = island.body(notes);
-        }
         if let Some(url) = self.download() {
             island = island.action(Action {
                 url: Some(url.into()),
@@ -287,10 +273,7 @@ mod tests {
         .unwrap();
         let island = release.island("0.2.0").validated().unwrap();
         assert_eq!(island.title, "Houston 0.3.0 is ready for launch");
-        assert_eq!(
-            island.body.as_deref(),
-            Some("What's new · Watch list · MCP server")
-        );
+        assert_eq!(island.body, None, "the notes are behind What's new");
         assert!(island.sticky);
         let ids: Vec<&str> = island.actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["download", "notes", "skip"]);
