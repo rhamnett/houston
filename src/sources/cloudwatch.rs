@@ -1,6 +1,7 @@
-//! Polls `aws cloudwatch describe-alarms --state-value ALARM` for each
-//! configured profile and region. New alarms appear as critical islands; an
-//! alarm that drops out of ALARM gets a short "OK" island. Uses the AWS CLI, so
+//! Polls `aws cloudwatch describe-alarms` for each configured profile and
+//! region. New alarms in ALARM appear as critical islands; an alarm that drops
+//! out of ALARM gets a short "OK" island. Every alarm checked, in any state,
+//! goes to the watch list in the expanded island. Uses the AWS CLI, so
 //! a CLI profile works; the recommended way is an IAM access key whose secret
 //! is in the Keychain, since SSO sessions expire within hours.
 
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::aws::{self, AlarmState, Creds, Discovered};
 use crate::config::{AlarmRule, AwsAccount, AwsAuth, CloudWatchConfig};
 use crate::island::{Island, Kind, Severity};
-use crate::source::{Inbound, Sink, Source};
+use crate::source::{Inbound, Sink, Source, Watched};
 
 const MIN_INTERVAL_SECS: u64 = 15;
 
@@ -35,13 +36,12 @@ impl CloudWatch {
         Self { config, rules, cli }
     }
 
-    /// Alarms in ALARM; `secret` overrides the Keychain (Preferences' Test).
+    /// Every watched alarm, in any state; `secret` overrides the Keychain
+    /// (Preferences' Test). One call either way: the CLI pages for us.
     fn poll(&self, account: &AwsAccount, secret: Option<&str>) -> Result<Vec<AlarmState>, String> {
         let mut args = vec![
             "cloudwatch",
             "describe-alarms",
-            "--state-value",
-            "ALARM",
             "--alarm-types",
             "MetricAlarm",
             "CompositeAlarm",
@@ -84,9 +84,14 @@ pub fn probe(
         Vec::new(),
         cli.map(String::from),
     );
-    let alarms = cw.poll(account, secret)?;
+    let watched = cw.poll(account, secret)?;
+    let total = watched.len();
+    let alarms: Vec<&AlarmState> = watched.iter().filter(|a| a.state == "ALARM").collect();
     Ok(match alarms.len() {
-        0 => format!("Connected to {}. No alarms in ALARM.", label(account)),
+        0 => format!(
+            "Connected to {}. Watching {total}, none in ALARM.",
+            label(account)
+        ),
         n => {
             let names: Vec<&str> = alarms.iter().take(3).map(|a| a.name.as_str()).collect();
             let more = if n > 3 {
@@ -95,12 +100,34 @@ pub fn probe(
                 String::new()
             };
             format!(
-                "Connected to {}. {n} in ALARM: {}{more}.",
+                "Connected to {}. Watching {total}, {n} in ALARM: {}{more}.",
                 label(account),
                 names.join(", ")
             )
         }
     })
+}
+
+/// Firing first, then no data, then fine.
+fn state_rank(state: &str) -> u8 {
+    match state {
+        "ALARM" => 0,
+        "INSUFFICIENT_DATA" => 1,
+        _ => 2,
+    }
+}
+
+fn watch_list(alarms: &[AlarmState], group: &str, rules: &[AlarmRule]) -> Vec<Watched> {
+    alarms
+        .iter()
+        .map(|a| Watched {
+            name: a.name.clone(),
+            state: a.state.clone(),
+            group: group.to_string(),
+            url: a.console_url(),
+            muted: a.rule_index(rules).is_some_and(|i| rules[i].mute),
+        })
+        .collect()
 }
 
 fn label(account: &AwsAccount) -> String {
@@ -168,6 +195,8 @@ impl Source for CloudWatch {
         ));
         // Per account, the alarms in ALARM at the last good poll (keyed by island key).
         let mut known: HashMap<usize, HashMap<String, AlarmState>> = HashMap::new();
+        // Per account, everything checked at the last good poll.
+        let mut watched: HashMap<usize, Vec<Watched>> = HashMap::new();
         loop {
             let started = Instant::now();
             for (i, account) in self.config.accounts.iter().enumerate() {
@@ -175,8 +204,12 @@ impl Source for CloudWatch {
                 match self.poll(account, None) {
                     Ok(alarms) => {
                         sink.remove(&error_key(account));
-                        let now: HashMap<String, AlarmState> =
-                            alarms.into_iter().map(|a| (a.key(), a)).collect();
+                        watched.insert(i, watch_list(&alarms, &name, &self.rules));
+                        let now: HashMap<String, AlarmState> = alarms
+                            .into_iter()
+                            .filter(|a| a.state == "ALARM")
+                            .map(|a| (a.key(), a))
+                            .collect();
                         for alarm in now.values() {
                             if let Some(island) = alarm.island_with(Some(&name), &self.rules) {
                                 sink.upsert(island);
@@ -207,6 +240,15 @@ impl Source for CloudWatch {
                     }
                 }
             }
+            let mut all: Vec<Watched> = watched.values().flatten().cloned().collect();
+            all.sort_by(|a, b| {
+                (state_rank(&a.state), &a.group, &a.name).cmp(&(
+                    state_rank(&b.state),
+                    &b.group,
+                    &b.name,
+                ))
+            });
+            sink.watching(all);
             // Wait out the interval; actions on alarm islands are all built in.
             let deadline = started + interval;
             loop {
@@ -217,5 +259,43 @@ impl Source for CloudWatch {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alarm(name: &str, state: &str) -> AlarmState {
+        AlarmState {
+            name: name.into(),
+            state: state.into(),
+            region: Some("eu-west-2".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn watch_list_marks_muted_alarms_and_links_the_console() {
+        let rules: Vec<AlarmRule> = vec![
+            serde_json::from_str(r#"{"pattern":"*-canary","mute":true}"#).unwrap(),
+            serde_json::from_str(r#"{"pattern":"*","severity":"warning"}"#).unwrap(),
+        ];
+        let list = watch_list(
+            &[alarm("api-5xx", "OK"), alarm("web-canary", "ALARM")],
+            "apollo-dev",
+            &rules,
+        );
+        assert_eq!(list.len(), 2, "every state, not just ALARM");
+        assert!(!list[0].muted && list[1].muted);
+        assert_eq!(list[0].group, "apollo-dev");
+        assert!(list[0].url.as_deref().unwrap().contains("alarm/api-5xx"));
+    }
+
+    #[test]
+    fn firing_sorts_first() {
+        let mut states = ["OK", "ALARM", "INSUFFICIENT_DATA", "OK"];
+        states.sort_by_key(|s| state_rank(s));
+        assert_eq!(states, ["ALARM", "INSUFFICIENT_DATA", "OK", "OK"]);
     }
 }

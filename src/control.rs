@@ -210,6 +210,7 @@ impl App {
             "focus": self.focus_label(),
             "sources": self.registry.ids(),
             "statuses": self.statuses,
+            "watching": self.watching,
             "drills": self.config.demo.autoplay,
             "drill_triggers": sources::DEMO_TRIGGERS.iter().map(|(id, _)| id).collect::<Vec<_>>(),
         })

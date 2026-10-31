@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use tao::event_loop::EventLoopProxy;
@@ -26,6 +27,22 @@ pub enum SourceEvent {
     Remove(String),
     /// A line for the log and the tray tooltip, e.g. "polling 2 accounts".
     Status(String),
+    /// Everything the source checks, in any state (CloudWatch's alarms), for
+    /// the watch list in the expanded island. Replaces the last list.
+    Watching(Vec<Watched>),
+}
+
+/// One thing a source keeps an eye on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Watched {
+    pub name: String,
+    /// e.g. `ALARM`, `OK`, `INSUFFICIENT_DATA`.
+    pub state: String,
+    /// Which account or group it belongs to.
+    pub group: String,
+    pub url: Option<String>,
+    /// A rule drops it, so it never raises an island.
+    pub muted: bool,
 }
 
 /// Sent to a source.
@@ -99,6 +116,10 @@ impl Sink {
 
     pub fn status(&self, msg: impl Into<String>) {
         self.send(SourceEvent::Status(msg.into()));
+    }
+
+    pub fn watching(&self, list: Vec<Watched>) {
+        self.send(SourceEvent::Watching(list));
     }
 
     /// Have the app carry out `command` and wait for its answer (the local

@@ -12,6 +12,7 @@ use wry::{WebView, WebViewBuilder};
 use crate::UserEvent;
 use crate::island::Island;
 use crate::notch::{self, Geometry, Notch, Rect};
+use crate::source::Watched;
 
 /// Room for the widest island plus its glow.
 pub const WIDTH: f64 = 640.0;
@@ -56,6 +57,10 @@ pub enum OverlayMessage {
     Demo {
         trigger: String,
     },
+    /// A link from the watch list (checked to be http or https).
+    Open {
+        url: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +86,8 @@ pub struct OverlayState<'a> {
     pub triggers: &'a [(&'a str, &'a str)],
     /// Show the drill (demo) controls in the expanded island.
     pub drills: bool,
+    /// Everything being checked, for the watch list under "All systems nominal".
+    pub watching: Vec<&'a Watched>,
 }
 
 pub struct Overlay {
@@ -293,6 +300,29 @@ const PAGE: &str = r##"<!doctype html>
   .demo { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
   .demo button { font-size: 11px; padding: 5px 9px; }
   .demo button.tour { background: var(--info); color: #fff; }
+
+  /* The watch list: everything being checked, behind a small toggle. */
+  .watchwrap { margin-top: 8px; }
+  .empty.quiet .watchwrap { margin-top: 4px; padding-bottom: 6px; }
+  .watchbtn { background: transparent; color: var(--muted); font-size: 11px; padding: 3px 9px; }
+  .watchbtn:hover { background: var(--card2); color: var(--fg); }
+  .watchbtn .caret { display: inline-block; width: 5px; height: 5px; margin: 0 1px 2px 5px;
+    border-right: 1.5px solid; border-bottom: 1.5px solid; transform: rotate(45deg);
+    transition: transform .2s var(--ease); }
+  .watchbtn.open .caret { transform: translateY(3px) rotate(-135deg); }
+  .watchbtn .firing { color: var(--critical); font-weight: 600; }
+  .watch { margin: 6px 0 2px; max-height: 196px; overflow-y: auto; text-align: left;
+    background: var(--card); border-radius: 12px; padding: 4px; }
+  .watch::-webkit-scrollbar { width: 0; }
+  .wrow { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 7px; font-size: 11px; }
+  .wrow[data-url] { cursor: pointer; }
+  .wrow[data-url]:hover { background: var(--card2); }
+  .wrow.muted { opacity: .5; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--success); }
+  .dot.st-ALARM { background: var(--critical); }
+  .dot.st-INSUFFICIENT_DATA { background: var(--warning); }
+  .wname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wgroup { color: var(--faint); font-size: 10px; white-space: nowrap; }
 </style></head>
 <body>
 <div id="island" class="island mode-idle"><div class="clip">
@@ -308,6 +338,8 @@ const WING = 56, NOTCH_CLEAR = 6, PEEK_W = 380, EXPANDED_W = 440, MAX_H = 470;
 /* Room either side of the notch for the header band in peek and expanded. */
 const PEEK_SIDE = 90, EXPANDED_SIDE = 150;
 let state = null;
+/* The watch list is open (until the island collapses). */
+let showWatch = false;
 
 /* Update the DOM in place instead of replacing it, so cards that are already
    showing don't replay their entrance, progress bars glide, and pulses keep
@@ -448,6 +480,22 @@ function band(left, right, h) {
     <div class="notchgap" style="width:${state.notch.width + 2 * NOTCH_CLEAR}px"></div><div class="side right">${right}</div></div>`;
 }
 
+function watchList() {
+  const w = state.watching;
+  if (!w.length) return "";
+  const firing = w.filter((a) => a.state === "ALARM" && !a.muted).length;
+  const nodata = w.filter((a) => a.state === "INSUFFICIENT_DATA").length;
+  // Name the account only when there's more than one.
+  const groups = new Set(w.map((a) => a.group)).size > 1;
+  const label = `📡 ${w.length} watched${firing ? ` · <span class="firing">${firing} firing</span>` : ""}${nodata ? ` · ${nodata} no data` : ""}`;
+  const button = `<button id="watch" class="watchbtn${showWatch ? " open" : ""}" title="Alarms being checked">${label} <span class="caret"></span></button>`;
+  const rows = showWatch ? `<div class="watch">${w.map((a) =>
+    `<div class="wrow${a.muted ? " muted" : ""}" data-key="${esc(a.group)}/${esc(a.name)}"${a.url ? ` data-url="${esc(a.url)}"` : ""}
+      title="${esc(a.name)} · ${esc(a.state)}${a.url ? " · open in the console" : ""}"><i class="dot st-${esc(a.state)}"></i>
+      <span class="wname">${esc(a.name)}</span><span class="wgroup">${[a.muted && "muted", groups && esc(a.group)].filter(Boolean).join(" · ")}</span></div>`).join("")}</div>` : "";
+  return `<div class="watchwrap">${button}${rows}</div>`;
+}
+
 function expanded(h) {
   const n = state.islands.length;
   const critical = state.islands.filter((i) => i.severity === "critical").length;
@@ -458,8 +506,8 @@ function expanded(h) {
   const list = n ? state.islands.map((i) => card(i, true)).join("") :
     state.drills
       ? `<div class="empty"><div class="big">All systems nominal</div><div class="sub">Nothing needs you. Fancy a drill?</div>
-          <div class="demo">${state.triggers.map(([id, label]) => `<button class="${id === "tour" ? "tour" : ""}" data-trigger="${id}">${esc(label)}</button>`).join("")}</div></div>`
-      : `<div class="empty quiet"><div class="big">All systems nominal</div></div>`;
+          <div class="demo">${state.triggers.map(([id, label]) => `<button class="${id === "tour" ? "tour" : ""}" data-trigger="${id}">${esc(label)}</button>`).join("")}</div>${watchList()}</div>`
+      : `<div class="empty quiet"><div class="big">All systems nominal</div>${watchList()}</div>`;
   const shown = state.sources.filter((s) => state.drills || s !== "demo");
   const foot = `<div class="foot"><span>${state.api ? `API ${esc(state.api)}` : "API off"}</span><span>${shown.map(esc).join(" · ")}</span></div>`;
   return band(left, right, h) + `<div class="list">${list}</div>` + foot;
@@ -476,6 +524,7 @@ function render() {
   const nh = state.notch.height, nw = state.notch.width;
   const lead = state.islands[0];
   let mode = state.mode, w = nw, h = nh, radius = Math.min(12, nh / 2.4), ear = 8;
+  if (mode !== "expanded") showWatch = false;
   const alarm = state.islands.some((i) => i.severity === "critical") && mode !== "expanded";
   const hidden = mode === "idle" && !state.notch.has_notch;
   // Set the class once, unchanged when nothing changed, so the glow keeps going.
@@ -525,8 +574,11 @@ setInterval(() => {
 }, 1000);
 
 document.addEventListener("click", (e) => {
+  const row = e.target.closest(".wrow[data-url]");
+  if (row) return post({ type: "open", url: row.dataset.url });
   const t = e.target.closest("button");
   if (!t) return;
+  if (t.id === "watch") { showWatch = !showWatch; return render(); }
   if (t.dataset.action) post({ type: "action", id: t.dataset.id, action: t.dataset.action });
   else if (t.dataset.dismiss) post({ type: "dismiss", id: t.dataset.dismiss });
   else if (t.dataset.trigger) post({ type: "demo", trigger: t.dataset.trigger });

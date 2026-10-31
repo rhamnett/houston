@@ -156,6 +156,8 @@ struct App {
     peek: Option<(String, Instant)>,
     api_url: Option<String>,
     statuses: Vec<String>,
+    /// Per source, what it checks (CloudWatch alarms in any state).
+    watching: std::collections::BTreeMap<String, Vec<source::Watched>>,
     last_render: String,
     tray: TrayIcon,
     items: MenuItems,
@@ -239,6 +241,7 @@ impl App {
             sources: self.registry.ids(),
             triggers: sources::DEMO_TRIGGERS,
             drills: self.config.demo.autoplay,
+            watching: self.watching.values().flatten().collect(),
         };
         let json = match serde_json::to_string(&state) {
             Ok(j) => j,
@@ -304,6 +307,9 @@ impl App {
             SourceEvent::Remove(key) => {
                 self.store.remove(&store::id_of(&source, &key));
             }
+            SourceEvent::Watching(list) => {
+                self.watching.insert(source, list);
+            }
             SourceEvent::Status(msg) => {
                 log::line(&msg);
                 if msg.starts_with("local API on http") {
@@ -333,6 +339,7 @@ impl App {
             }
             OverlayMessage::ClearAll => self.store.clear(),
             OverlayMessage::SetDnd { on } => self.set_dnd(on),
+            OverlayMessage::Open { url } => open_url(&url),
             OverlayMessage::Demo { trigger } => {
                 self.registry
                     .send(sources::DEMO_ID, Inbound::Trigger(trigger));
@@ -654,6 +661,7 @@ impl App {
         for id in ids {
             self.registry.restart(id, sources::build(id, &self.config));
             self.store.remove_source(id);
+            self.watching.remove(*id);
             self.statuses.retain(|s| !s.starts_with(&format!("{id}:")));
             if *id == "api" {
                 self.api_url = None;
@@ -896,6 +904,7 @@ fn main() {
                 peek: None,
                 api_url: None,
                 statuses: Vec::new(),
+                watching: Default::default(),
                 last_render: String::new(),
                 tray: tray.clone(),
                 items,
