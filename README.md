@@ -68,6 +68,22 @@ macOS asks once whether the new binary may read it: choose **Always Allow**.
 Builds from `cargo run` prompt after every rebuild. An installed
 `Houston.app` prompts only when you reinstall it.
 
+For the same reason, add a secret through Houston rather than with
+`security add-generic-password`. An item the `security` tool creates belongs
+to that tool, so Houston must ask before it can read it, and that dialog can
+open behind other windows and look like a source that never polls. From a
+terminal, `scripts/houston` goes through the local API, so Houston creates
+the item itself. Add the account first (Mission settings, or `PATCH
+/v1/settings`); a secret for a key no account uses is refused.
+
+```bash
+pbpaste | scripts/houston --secret aws-secret:AKIA…   # the value comes from stdin
+scripts/houston --forget-secret aws-secret:AKIA…
+```
+
+If you do use `security`, pass `-T` with the path of the Houston binary so the
+item trusts it from the start.
+
 ## What it does
 
 - A new notification **peeks**: it grows out of the notch as a card for 4–8 s
