@@ -53,6 +53,7 @@ access_key_id}, profile, region, label, alarm_prefix, include: [exact alarm name
 sqs {enabled, queue_url, auth, profile, region, wait_secs}, \
 linear {enabled, interval_secs, assigned_to_me, teams: [team keys], max_priority: 1-4}, \
 iot {enabled, endpoint, profile, region, topics} (not implemented yet), \
+updates {check: bool}, \
 alarm_rules: [{pattern (glob, first match wins), severity: info|success|warning|critical, \
 sticky, silent, mute, runbook_url}].";
 
@@ -82,8 +83,9 @@ pub fn tools() -> Vec<Value> {
         tool(
             "set_secret",
             "Store a secret in the macOS Keychain, or remove it with an empty value. Secrets \
-             can't be read back. Names: linear-api-key, or aws-secret:<access key id> for an \
-             access key already used by an account (add the account first).",
+             can't be read back. Names: linear-api-key, github-token (for update checks), or \
+             aws-secret:<access key id> for an access key already used by an account (add the \
+             account first).",
             json!({
                 "name": { "type": "string" },
                 "value": { "type": "string", "description": "Empty removes it." },
@@ -159,6 +161,15 @@ pub fn tools() -> Vec<Value> {
             json!({ "name": { "type": "string" } }),
             &["name"],
         )),
+        tool(
+            "check_for_updates",
+            "Ask GitHub for the latest Houston release now. The answer appears as an island \
+             (key update, source updates): a newer version with a download link, up to date, \
+             or why it couldn't check. Needs a github-token secret while the repository is \
+             private.",
+            json!({}),
+            &[],
+        ),
         tool(
             "post_island",
             "Show an island, or update it (same key). Fields: key, title (required), subtitle, \

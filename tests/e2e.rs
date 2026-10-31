@@ -29,6 +29,34 @@ fn spare_port() -> u16 {
         .port()
 }
 
+/// A one-release GitHub "latest release" feed on a spare port, for the
+/// update check. Answers every request the same; the URL to point at.
+fn fake_release_feed(tag: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/latest", listener.local_addr().unwrap());
+    let body = json!({
+        "tag_name": tag,
+        "html_url": format!("https://github.com/rhamnett/houston/releases/tag/{tag}"),
+        "body": "## Highlights\n- Faster than light",
+        "assets": [{"name": format!("Houston-{}-macos.zip", tag.trim_start_matches('v')),
+            "browser_download_url": "https://example.com/Houston.zip"}],
+    })
+    .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    url
+}
+
 fn security(args: &[&str]) -> bool {
     Command::new("/usr/bin/security")
         .args(args)
@@ -86,6 +114,7 @@ impl Sandbox {
             .env("HOUSTON_DATA_DIR", &home)
             .env("AWS_CONFIG_FILE", home.join("no-aws-config"))
             .env("HOUSTON_KEYCHAIN_SERVICE", &service)
+            .env("HOUSTON_UPDATE_URL", fake_release_feed("v99.0.0"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -300,7 +329,7 @@ fn full_mission_over_mcp_and_rest() {
         202
     );
     let tools = h.rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 16);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 17);
 
     // Settings: what the seeded file says, with secrets only as flags.
     let s = h.ok("get_settings", json!({}));
@@ -496,6 +525,31 @@ fn full_mission_over_mcp_and_rest() {
         replies[1]["result"]["structuredContent"]["settings"]["sounds"],
         true
     );
+
+    // Update check: a newer release is offered; Skip remembers it.
+    assert_eq!(h.ok("check_for_updates", json!({}))["checking"], true);
+    h.wait_for_islands(&["updates/update"]);
+    let offer = &h.ok("get_status", json!({}))["islands"][0]["island"];
+    assert_eq!(offer["title"], "Houston 99.0.0 is ready for launch");
+    assert_eq!(
+        offer["actions"][0]["url"],
+        "https://example.com/Houston.zip"
+    );
+    h.ok(
+        "press_button",
+        json!({"id": "updates/update", "action": "skip"}),
+    );
+    h.wait_for_islands(&[]);
+    assert_eq!(
+        std::fs::read_to_string(h.home.join("skipped-update")).unwrap(),
+        "v99.0.0"
+    );
+    // Turning checks off stops the source, and the tool says so.
+    h.ok(
+        "update_settings",
+        json!({"patch": {"updates": {"check": false}}}),
+    );
+    assert!(h.err("check_for_updates", json!({})).contains("off"));
 
     // Moving the API: the answer still arrives, then only the new port works.
     let old = h.port;

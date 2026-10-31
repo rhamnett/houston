@@ -117,6 +117,7 @@ struct MenuIds {
     copy_token: MenuId,
     config: MenuId,
     prefs: MenuId,
+    updates: MenuId,
 }
 
 /// Tray menu items whose text or state follows the config.
@@ -420,6 +421,8 @@ impl App {
                 .send(sources::DEMO_ID, Inbound::Trigger((*trigger).into()));
         } else if *id == self.menu.dnd {
             self.set_dnd(self.items.dnd.is_checked());
+        } else if *id == self.menu.updates {
+            self.check_for_updates();
         } else if *id == self.menu.clear {
             self.store.clear();
         } else if *id == self.menu.copy_token {
@@ -430,6 +433,16 @@ impl App {
             let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
         }
         self.render();
+    }
+
+    /// Check now; the answer arrives as an island. False when checks are off.
+    fn check_for_updates(&mut self) -> bool {
+        if !self.registry.ids().contains(&sources::UPDATES_ID) {
+            return false;
+        }
+        self.registry
+            .send(sources::UPDATES_ID, Inbound::Trigger("check".into()));
+        true
     }
 
     fn open_prefs(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
@@ -446,6 +459,7 @@ impl App {
         SecretFlags {
             api_token: !self.config.api.token.is_empty(),
             linear_api_key: !self.config.linear.api_key.is_empty(),
+            github_token: !self.config.updates.token.is_empty(),
             aws: self
                 .config
                 .access_key_ids()
@@ -764,6 +778,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
     let copy_token = MenuItem::new("Copy API token", config.api.enabled, None);
     let open_config = MenuItem::new("Open config folder", true, None);
     let prefs = MenuItem::new("Mission settings…", true, None);
+    let updates = MenuItem::new("Check for updates…", true, None);
     let drills_sep = PredefinedMenuItem::separator();
     let menu = Menu::with_items(&[
         &dnd,
@@ -775,6 +790,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         &open_config,
         &PredefinedMenuItem::separator(),
         &prefs,
+        &updates,
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::quit(Some("Quit Houston (splashdown)")),
     ])
@@ -786,6 +802,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         copy_token: copy_token.id().clone(),
         config: open_config.id().clone(),
         prefs: prefs.id().clone(),
+        updates: updates.id().clone(),
     };
     if config.demo.autoplay {
         let _ = menu.insert_items(&[&demo, &drills_sep], 0);

@@ -234,6 +234,27 @@ impl Default for LinearConfig {
     }
 }
 
+/// The update check (see `sources/updates.rs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdatesConfig {
+    /// Look for a new release at launch and daily.
+    #[serde(default = "yes")]
+    pub check: bool,
+    /// A GitHub token that can read the (private) repository's releases:
+    /// fine-grained, Contents: read. Kept in the Keychain.
+    #[serde(default)]
+    pub token: String,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            token: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// Show islands without expanding or sounds.
@@ -262,6 +283,8 @@ pub struct Config {
     /// Applied to alarms from every source (poll, SQS, local API).
     #[serde(default)]
     pub alarm_rules: Vec<AlarmRule>,
+    #[serde(default)]
+    pub updates: UpdatesConfig,
 }
 
 impl Default for Config {
@@ -278,6 +301,7 @@ impl Default for Config {
             iot: IotConfig::default(),
             linear: LinearConfig::default(),
             alarm_rules: Vec::new(),
+            updates: UpdatesConfig::default(),
         }
     }
 }
@@ -326,6 +350,7 @@ impl Config {
         match s {
             Secret::ApiToken => &self.api.token,
             Secret::LinearApiKey => &self.linear.api_key,
+            Secret::GithubToken => &self.updates.token,
         }
     }
 
@@ -333,6 +358,7 @@ impl Config {
         match s {
             Secret::ApiToken => &mut self.api.token,
             Secret::LinearApiKey => &mut self.linear.api_key,
+            Secret::GithubToken => &mut self.updates.token,
         }
     }
 
@@ -499,6 +525,7 @@ mod tests {
         assert!(c.linear.assigned_to_me);
         assert_eq!(c.linear.max_priority, 2);
         assert!(c.alarm_rules.is_empty());
+        assert!(c.updates.check);
     }
 
     #[test]
@@ -506,8 +533,10 @@ mod tests {
         let mut c = Config::default();
         c.api.token = "s3cr3t-t0ken".into();
         c.linear.api_key = "lin_api_x".into();
+        c.updates.token = "github_pat_x".into();
         let written = serde_json::to_string(&c.without_secrets()).unwrap();
         assert!(!written.contains("s3cr3t-t0ken") && !written.contains("lin_api_x"));
+        assert!(!written.contains("github_pat_x"));
         assert_eq!(
             c.secret(Secret::LinearApiKey),
             "lin_api_x",

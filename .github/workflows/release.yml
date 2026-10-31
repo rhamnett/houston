@@ -1,0 +1,42 @@
+name: Release
+
+# Push a tag that matches Cargo.toml's version to publish it:
+#   git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag matches Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $version"; exit 1
+          fi
+      - run: cargo test
+      - name: Bundle (universal)
+        run: UNIVERSAL=1 ./bundle.sh
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          cat > notes.md <<NOTES
+          **Install:** unzip \`Houston-$version-macos.zip\`, move Houston.app to Applications and open it from the right-click menu the first time (it's ad-hoc signed, not notarised). Or: \`xattr -dr com.apple.quarantine /Applications/Houston.app\`.
+
+          Universal (Apple silicon and Intel), macOS 12 or later. SHA-256 is in the \`.sha256\` file.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Houston-$version-macos.zip" "dist/Houston-$version-macos.zip.sha256" \
+            --title "Houston $version" --notes-file notes.md --generate-notes --verify-tag

@@ -52,9 +52,10 @@ apart from secrets. Hand edits there are picked up at the next launch.
 
 ## Secrets live in the Keychain
 
-The local API token and the Linear API key are stored in your login Keychain
-under the service `local.houston`, never in `config.json`. Mission settings
-can replace or remove a secret, but never reads one back: it only shows
+The local API token, the Linear API key and the GitHub token (for update
+checks) are stored in your login Keychain under the service `local.houston`,
+never in `config.json`. Mission settings can replace or remove a secret, but
+never reads one back: it only shows
 "🔒 in Keychain". A secret found in the config file (from an older version,
 or a hand edit) is moved to the Keychain and blanked on the next launch.
 
@@ -80,7 +81,13 @@ Builds from `cargo run` prompt after every rebuild. An installed
 
 The menu bar icon shows how many warnings and criticals are active. Its menu
 has **Run a drill** (the demos), **Radio silence** (do not disturb: no peeks,
-no sounds), **Clear the board**, **Copy API token** and **Open config folder**.
+no sounds), **Clear the board**, **Copy API token**, **Open config folder**
+and **Check for updates…**.
+
+With nothing on the board, the expanded island says **All systems nominal**
+and, under it, **📡 N watched**: open it for a compact list of every alarm
+being checked, firing first, with a state dot each. Click one to open it in
+the CloudWatch console.
 
 ### macOS Focus
 
@@ -218,7 +225,7 @@ Settings and remote control, the same things Mission settings and the menu do:
   validated, saved and applied like a Save, restarting only the affected
   sources.
 - `PUT /v1/secrets/{name}` with `{"value": "…"}`, `DELETE /v1/secrets/{name}`:
-  `linear-api-key`, or `aws-secret:<access key id>`. Secrets go to the Keychain
+  `linear-api-key`, `github-token`, or `aws-secret:<access key id>`. Secrets go to the Keychain
   and are never returned. The API token itself can only be regenerated in
   Mission settings.
 - `GET /v1/status`: the board, radio silence, Focus, sources and their status
@@ -245,7 +252,7 @@ and drills, and post or clear islands. Tools: `get_settings`,
 `update_settings`, `set_secret`, `list_aws_profiles`, `get_status`,
 `set_radio_silence`, `clear_board`, `dismiss_island`, `press_button`,
 `run_drill`, `test_cloudwatch`, `discover_alarms`, `test_linear`,
-`test_alarm_rule`, `post_island`, `remove_island`.
+`test_alarm_rule`, `check_for_updates`, `post_island`, `remove_island`.
 
 Over HTTP, at `/mcp` on the local API with the same token (Claude Code):
 
@@ -410,12 +417,47 @@ a first draft of `alarm_rules`. Copy the parts you want into your config.
 
 ## Install and launch at login
 
+Download `Houston-<version>-macos.zip` from
+[Releases](https://github.com/rhamnett/houston/releases) (universal: Apple
+silicon and Intel), unzip it and move Houston.app to Applications. It's
+ad-hoc signed, not notarised, so open it from the right-click menu the first
+time, or run `xattr -dr com.apple.quarantine /Applications/Houston.app`.
+
+Or build it:
+
 ```bash
-./bundle.sh            # writes dist/Houston.app (ad-hoc signed, this machine only)
-open "dist/Houston.app"
+./bundle.sh                # dist/Houston.app and a zip, for this Mac
+UNIVERSAL=1 ./bundle.sh    # both architectures, as releases are built
+open dist/Houston.app
 ```
 
 Then add it under System Settings > General > Login Items.
+
+### Updates
+
+Houston looks for a newer release 30 seconds after launch and then daily;
+**Check for updates…** in the menu (or the `check_for_updates` MCP tool)
+checks now. A new version arrives as an island with **Download ↗**,
+**What's new ↗** and **Skip this version**. Nothing installs by itself. Turn
+it off under Mission settings > General.
+
+While the repository is private, the check needs a GitHub token that can see
+it: a fine-grained token with **Contents: read** on `rhamnett/houston`, pasted
+into Mission settings > General (it goes to the Keychain). Without one, the
+status line says so and nothing else happens.
+
+### Releasing
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy, the tests and the
+end-to-end tests on every push to main and every pull request. To publish,
+bump `version` in `Cargo.toml`, commit, and push a matching tag:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`release.yml` checks the tag matches `Cargo.toml`, tests, builds the
+universal bundle and publishes a GitHub release with the zip and its SHA-256.
 
 ## Logs
 
@@ -428,7 +470,7 @@ the terminal otherwise.
 - `src/island.rs`: the notification model and validation
 - `src/store.rs`: active islands, expiry, snooze, dismissal, ordering
 - `src/source.rs`: the `Source` trait, `Sink` and `Registry`
-- `src/sources/`: `demo`, `local_api`, `cloudwatch`, `sqs`, `linear`, `iot` (stub)
+- `src/sources/`: `demo`, `local_api`, `cloudwatch`, `sqs`, `linear`, `updates`, `iot` (stub)
 - `src/aws.rs`: the AWS CLI runner, the alarm and findings mappers, alarm rules
 - `src/overlay.rs`: the overlay window and the island page (HTML/CSS/JS)
 - `src/notch.rs`: notch geometry, window level and Spaces, the hover monitor

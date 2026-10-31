@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      # A sandboxed Houston (its own data folder, Keychain service and port),
+      # flown over MCP and REST. Runners have a logged-in session and Keychain.
+      - name: End-to-end
+        run: cargo test --test e2e -- --ignored --nocapture

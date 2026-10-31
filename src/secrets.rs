@@ -25,10 +25,12 @@ pub enum Secret {
     /// Bearer token for the local HTTP API.
     ApiToken,
     LinearApiKey,
+    /// Reads releases of the private repository, for the update check.
+    GithubToken,
 }
 
 impl Secret {
-    pub const ALL: [Secret; 2] = [Secret::ApiToken, Secret::LinearApiKey];
+    pub const ALL: [Secret; 3] = [Secret::ApiToken, Secret::LinearApiKey, Secret::GithubToken];
 
     /// The Keychain account name, e.g. for
     /// `security find-generic-password -s local.houston -a api-token -w`.
@@ -36,6 +38,7 @@ impl Secret {
         match self {
             Secret::ApiToken => "api-token",
             Secret::LinearApiKey => "linear-api-key",
+            Secret::GithubToken => "github-token",
         }
     }
 }

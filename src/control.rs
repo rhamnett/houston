@@ -61,6 +61,7 @@ pub enum Command {
     TestAlarmRule {
         name: String,
     },
+    CheckForUpdates {},
     /// Handled by the API thread itself: it owns the `api` source's sink.
     PostIsland {
         island: Box<Island>,
@@ -131,7 +132,7 @@ pub fn check_secret(config: &Config, name: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "No secret called {name}: use linear-api-key or aws-secret:<access key id>."
+            "No secret called {name}: use linear-api-key, github-token or aws-secret:<access key id>."
         ))
     }
 }
@@ -290,6 +291,16 @@ impl App {
                     "rule": index.map(|i| &self.config.alarm_rules[i]),
                 }))
             }
+            Command::CheckForUpdates {} => {
+                if !self.check_for_updates() {
+                    return Err("Update checks are off: set updates.check to true.".into());
+                }
+                Ok(json!({
+                    "checking": true,
+                    "current": env!("CARGO_PKG_VERSION"),
+                    "note": "The answer arrives as an island with key \"update\" from source \"updates\".",
+                }))
+            }
             Command::PostIsland { .. } | Command::RemoveIsland { .. } => {
                 Err("Islands are posted through the API.".into())
             }
@@ -406,8 +417,9 @@ mod tests {
                 .unwrap_err()
                 .contains("No account")
         );
+        assert!(check_secret(&config, "github-token").is_ok());
         assert!(
-            check_secret(&config, "github-token")
+            check_secret(&config, "slack-token")
                 .unwrap_err()
                 .contains("No secret")
         );
@@ -436,10 +448,11 @@ mod tests {
             "test_alarm_rule",
             "post_island",
             "remove_island",
+            "check_for_updates",
         ] {
             assert!(names.iter().any(|n| n == name), "{name} isn't advertised");
         }
-        assert_eq!(names.len(), 16, "a tool without a command, or the reverse");
+        assert_eq!(names.len(), 17, "a tool without a command, or the reverse");
     }
 
     #[test]

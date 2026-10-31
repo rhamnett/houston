@@ -73,6 +73,7 @@ pub enum PrefsMessage {
 pub struct SecretFlags {
     pub api_token: bool,
     pub linear_api_key: bool,
+    pub github_token: bool,
     /// Access key id → whether its secret is in the Keychain.
     pub aws: HashMap<String, bool>,
 }
@@ -435,6 +436,10 @@ const VIEWS = {
         ${focusUnreadable ? `<br><button class="small" data-act="fda">Open Full Disk Access</button> then add Houston (or your terminal, for <code>cargo run</code>) and restart it.` : "Focus modes started by a schedule aren't seen, only ones switched on by hand or by a Shortcut."}`)}
       ${row("Drills", toggle("demo.autoplay"), "Play the demo a second after Houston starts, and offer drills when you hover the notch and in the menu bar menu. Off hides them everywhere.")}
       ${row("AWS CLI path", optText("aws_cli", "auto: /opt/homebrew/bin/aws"), "Only if <code>aws</code> lives somewhere unusual.")}
+    </div>
+    <div class="card">
+      ${row("Check for updates", toggle("updates.check"), "At launch and once a day. A new release shows up as an island with a download link; nothing installs by itself. <b>Check for updates…</b> in the menu bar menu checks now.")}
+      ${row("GitHub token", secretField("github-token", secretFlags.github_token, "github_pat_…"), "The repository is private: a fine-grained token with <b>Contents: read</b> on rhamnett/houston lets Houston see its releases.")}
     </div>
     <div class="card">${row("Config folder", `<button data-act="open-folder">Open in Finder</button>`)}</div>
     <div class="card"><div class="row"><label>Source status</label><div class="status">${esc(statuses.join("\n") || "No reports yet.")}</div></div></div>`,

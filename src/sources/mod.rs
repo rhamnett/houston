@@ -7,6 +7,7 @@ mod iot;
 mod linear;
 mod local_api;
 mod sqs;
+mod updates;
 
 use serde_json::json;
 
@@ -17,10 +18,11 @@ pub use cloudwatch::{discover as discover_alarms, probe as probe_cloudwatch};
 pub use demo::DEMO_ID;
 pub use demo::TRIGGERS as DEMO_TRIGGERS;
 pub use linear::probe as probe_linear;
+pub use updates::ID as UPDATES_ID;
 
 /// Sources that Preferences can restart. The demo keeps running: its only
 /// setting takes effect at the next launch.
-pub const RESTARTABLE: &[&str] = &["api", "cloudwatch", "sqs", "linear", "iot"];
+pub const RESTARTABLE: &[&str] = &["api", "cloudwatch", "sqs", "linear", "iot", "updates"];
 
 /// Sources that apply alarm rules sent as `Inbound::Rules`.
 pub const LIVE_RULES: &[&str] = &["api"];
@@ -49,6 +51,9 @@ pub fn build(id: &str, config: &Config) -> Option<Box<dyn Source>> {
             Some(Box::new(linear::Linear::new(config.linear.clone())))
         }
         "iot" if config.iot.enabled => Some(Box::new(iot::Iot::new(config.iot.clone()))),
+        "updates" if config.updates.check => {
+            Some(Box::new(updates::Updates::new(config.updates.clone())))
+        }
         _ => None,
     }
 }
@@ -63,6 +68,7 @@ pub fn fingerprint(id: &str, config: &Config) -> String {
         "sqs" => json!([config.sqs, config.alarm_rules, config.aws_cli]),
         "linear" => json!(config.linear),
         "iot" => json!(config.iot),
+        "updates" => json!(config.updates),
         _ => json!(null),
     };
     value.to_string()
@@ -106,7 +112,7 @@ mod tests {
         let mut c = Config::default();
         c.linear.enabled = true;
         c.iot.enabled = true;
-        for id in ["api", "linear", "iot"] {
+        for id in ["api", "linear", "iot", "updates"] {
             assert_eq!(build(id, &c).map(|s| s.id()).as_deref(), Some(id));
         }
         assert!(build("cloudwatch", &c).is_none(), "off by default");
