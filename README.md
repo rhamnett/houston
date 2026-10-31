@@ -500,6 +500,17 @@ New source? Add a module in `src/sources/`, implement `Source`, register it in
 `sources::from_config` and give it a config block in `src/config.rs`.
 `sources/iot.rs` is a good small example of the shape.
 
+## Security and contributing
+
+`main` only changes through pull requests: squash-merged, with CI (`check`)
+and Trivy (`trivy`) passing; nobody can push to it, force-push or delete it.
+`v*` release tags can't be moved or deleted once pushed. Trivy scans for
+vulnerable dependencies, committed secrets and misconfigurations on every
+pull request, on `main` and weekly; accepted findings live in
+`.trivyignore.yaml` with a reason and an expiry. Dependabot keeps Cargo
+crates and the SHA-pinned actions current. To report a vulnerability, see
+[SECURITY.md](SECURITY.md).
+
 ## Known limits
 
 - Clicking a button brings the app forward, so the app you were in loses focus

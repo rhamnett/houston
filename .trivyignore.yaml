@@ -1,0 +1,11 @@
+# Accepted findings. Each needs a reason and an expiry, so it gets looked at
+# again rather than ignored for good.
+vulnerabilities:
+  - id: GHSA-wrw7-89jp-8q8g
+    paths: ["Cargo.lock"]
+    statement: >-
+      glib 0.18 comes in only through tray-icon's Linux (GTK) backend; Houston
+      is macOS-only and never compiles it (`cargo tree -i glib --target
+      aarch64-apple-darwin` is empty). Fixed in glib 0.20, which needs the
+      GTK stack upstream to move first.
+    expired_at: 2027-04-30
