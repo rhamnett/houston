@@ -106,7 +106,8 @@ fn write_file(path: &std::path::Path, store: &FileStore) -> Result<(), String> {
 /// CloudWatch wants its secret key on every poll, and each read of an item
 /// can ask for the login password (a rebuilt binary isn't yet trusted), so
 /// the Keychain is asked once per launch. A refused read is remembered too:
-/// asking again every minute would only repeat the prompt.
+/// asking again every minute would only repeat the prompt. Other failures
+/// (a locked Keychain after sleep) are not: the next read tries again.
 static CACHE: std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
@@ -114,21 +115,32 @@ fn get_raw(account: &str) -> Option<String> {
     if let Some(path) = insecure_file() {
         return read_file(&path).remove(account).filter(|s| !s.is_empty());
     }
+    // Held across the read, so two sources wanting one secret get one prompt.
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    cache
-        .entry(account.to_string())
-        .or_insert_with(|| read_keychain(account))
-        .clone()
+    if let Some(value) = cache.get(account) {
+        return value.clone();
+    }
+    let (value, settled) = read_keychain(account);
+    if settled {
+        cache.insert(account.to_string(), value.clone());
+    }
+    value
 }
 
-fn read_keychain(account: &str) -> Option<String> {
+/// errSecUserCanceled and errSecAuthFailed: the prompt was dismissed or denied.
+const REFUSED: [i32; 2] = [-128, -25293];
+
+/// The value, and whether that answer is final (found, absent or refused).
+fn read_keychain(account: &str) -> (Option<String>, bool) {
     match get_generic_password(&service(), account) {
-        Ok(bytes) => String::from_utf8(bytes).ok().filter(|s| !s.is_empty()),
+        Ok(bytes) => (
+            String::from_utf8(bytes).ok().filter(|s| !s.is_empty()),
+            true,
+        ),
+        Err(e) if e.code() == NOT_FOUND => (None, true),
         Err(e) => {
-            if e.code() != NOT_FOUND {
-                crate::log::line(&format!("keychain read {account}: {e}"));
-            }
-            None
+            crate::log::line(&format!("keychain read {account}: {e}"));
+            (None, REFUSED.contains(&e.code()))
         }
     }
 }

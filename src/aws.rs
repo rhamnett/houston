@@ -712,20 +712,67 @@ type Expiring = (Keys, Option<DateTime<Utc>>);
 /// Temporary keys by profile, until a few minutes before they expire.
 static TEMPORARY: Mutex<BTreeMap<String, Expiring>> = Mutex::new(BTreeMap::new());
 
+/// A credential helper may wait on a prompt (aws-vault, 1Password): give up
+/// rather than stall a source.
+const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Login items start with a bare PATH, so the usual install locations are
 /// added for the CLI and credential helpers.
 fn run(mut cmd: Command, what: &str) -> Result<String, String> {
+    use std::io::Read;
+    use std::process::Stdio;
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}",
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = cmd
+    let mut child = cmd
         .env("PATH", path)
         .env("AWS_PAGER", "")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("{what}: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+    // Drain both pipes while waiting, so a chatty child can't fill one and stall.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut text);
+            }
+            text
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = std::time::Instant::now() + HELPER_TIMEOUT;
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("{what}: {e}"))? {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{what}: no answer in {}s",
+                    HELPER_TIMEOUT.as_secs()
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    let out = stdout.join().unwrap_or_default();
+    if !status.success() {
+        let err = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
         let line = err
             .lines()
             .rev()
@@ -733,7 +780,23 @@ fn run(mut cmd: Command, what: &str) -> Result<String, String> {
             .unwrap_or("failed");
         return Err(line.trim().to_string());
     }
-    String::from_utf8(out.stdout).map_err(|e| e.to_string())
+    String::from_utf8(out).map_err(|e| e.to_string())
+}
+
+/// When temporary keys expire: RFC 3339, or ISO 8601 without an offset (some
+/// helpers print that), read as UTC.
+fn expiry(text: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text)
+        .map(|t| t.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(
+                text.trim_end_matches('Z'),
+                "%Y-%m-%dT%H:%M:%S%.f",
+            )
+            .ok()
+            .map(|t| t.and_utc())
+        })
 }
 
 /// Keys for a profile. Static keys and `credential_process` are handled
@@ -751,11 +814,14 @@ fn profile_keys(binary: Option<&str>, name: &str) -> Result<Keys, String> {
             token: settings.get("aws_session_token").cloned(),
         });
     }
-    let mut cache = TEMPORARY.lock().unwrap_or_else(|e| e.into_inner());
     let fresh = |expires: &Option<DateTime<Utc>>| {
         expires.is_none_or(|t| t - chrono::Duration::minutes(5) > Utc::now())
     };
-    if let Some((keys, expires)) = cache.get(name)
+    // Not held while a helper runs: one slow profile mustn't stall the rest.
+    if let Some((keys, expires)) = TEMPORARY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
         && fresh(expires)
     {
         return Ok(keys.clone());
@@ -793,11 +859,22 @@ fn profile_keys(binary: Option<&str>, name: &str) -> Result<Keys, String> {
         secret: c.secret_access_key,
         token: c.session_token.filter(|t| !t.is_empty()),
     };
-    let expires = c
-        .expiration
-        .and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
-        .map(|t| t.with_timezone(&Utc));
-    cache.insert(name.to_string(), (keys.clone(), expires));
+    // No Expiration: they don't expire. One we can't read: don't keep them,
+    // or they'd be reused long after they stop working.
+    let expires = match c.expiration.as_deref() {
+        None => Some(None),
+        Some(t) => expiry(t).map(Some),
+    };
+    if let Some(expires) = expires {
+        TEMPORARY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), (keys.clone(), expires));
+    } else {
+        crate::log::line(&format!(
+            "credentials for {name}: unreadable Expiration, not cached"
+        ));
+    }
     Ok(keys)
 }
 
@@ -1131,6 +1208,30 @@ mod tests {
         let default = merge_settings(config, credentials, "default");
         assert_eq!(default.get("region").map(String::as_str), Some("us-east-1"));
         assert!(merge_settings(config, credentials, "nope").is_empty());
+    }
+
+    #[test]
+    fn expiry_formats() {
+        let want = "2026-11-02T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(expiry("2026-11-02T12:00:00Z"), Some(want));
+        assert_eq!(expiry("2026-11-02T13:00:00+01:00"), Some(want));
+        assert_eq!(expiry("2026-11-02T12:00:00"), Some(want));
+        assert_eq!(expiry("2026-11-02T12:00:00.000"), Some(want));
+        assert_eq!(expiry("tomorrow"), None);
+    }
+
+    #[test]
+    fn helpers_answer_or_time_out() {
+        let sh = |script: &str| {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", script]);
+            run(c, "helper")
+        };
+        assert_eq!(sh("echo ok").unwrap().trim(), "ok");
+        assert_eq!(
+            sh("echo first >&2; echo why >&2; exit 3").unwrap_err(),
+            "why"
+        );
     }
 
     #[test]
