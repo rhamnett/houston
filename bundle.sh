@@ -24,12 +24,25 @@ fi
 # The binary knows its version; the bundle and the zip follow it.
 VERSION=$("$APP/Contents/MacOS/houston" --version | cut -d' ' -f2)
 SHORT=${VERSION%%+*} # Info.plist wants plain numbers: 0.2.0+3.gabc -> 0.2.0
+# The app icon: the binary draws it (src/icon.rs), sips scales it.
+ICONS=$(mktemp -d)
+trap 'rm -rf "$ICONS"' EXIT
+SET="$ICONS/Houston.iconset"
+mkdir -p "$SET" "$APP/Contents/Resources"
+"$APP/Contents/MacOS/houston" --app-icon "$SET/icon_512x512@2x.png"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$SET/icon_512x512@2x.png" --out "$SET/icon_${size}x${size}.png" >/dev/null
+  [[ $size == 512 ]] || sips -z $((size * 2)) $((size * 2)) "$SET/icon_512x512@2x.png" \
+    --out "$SET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$SET" -o "$APP/Contents/Resources/Houston.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>houston</string>
+  <key>CFBundleIconFile</key><string>Houston</string>
   <key>CFBundleIdentifier</key><string>local.houston</string>
   <key>CFBundleName</key><string>Houston</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -43,7 +56,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 # Ad-hoc: no Developer ID yet, so a downloaded copy needs Open from the
 # right-click menu the first time (or: xattr -dr com.apple.quarantine).
-codesign --force --sign - "$APP" >/dev/null
+# SIGN_IDENTITY (e.g. "Apple Development: …") signs local builds with a
+# stable identity instead, so the Keychain's "Always Allow" survives rebuilds.
+codesign --force --sign "${SIGN_IDENTITY:--}" --identifier local.houston "$APP" >/dev/null
 ZIP="dist/Houston-${VERSION//+/-}-macos.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 (cd dist && shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256")

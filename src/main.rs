@@ -4,6 +4,7 @@
 //! new ones expand out of the notch for a few seconds, then sit either side of
 //! it until they expire or are dismissed. Hover the notch to see them all.
 
+mod about;
 mod aws;
 mod config;
 mod control;
@@ -17,6 +18,7 @@ mod notify;
 mod overlay;
 mod prefs;
 mod secrets;
+mod sigv4;
 mod source;
 mod sources;
 mod store;
@@ -122,6 +124,7 @@ struct MenuIds {
     config: MenuId,
     prefs: MenuId,
     updates: MenuId,
+    about: MenuId,
 }
 
 /// Tray menu items whose text or state follows the config.
@@ -427,6 +430,8 @@ impl App {
             self.set_dnd(self.items.dnd.is_checked());
         } else if *id == self.menu.updates {
             self.check_for_updates();
+        } else if *id == self.menu.about {
+            about::show();
         } else if *id == self.menu.clear {
             self.store.clear();
         } else if *id == self.menu.copy_token {
@@ -783,6 +788,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
     let open_config = MenuItem::new("Open config folder", true, None);
     let prefs = MenuItem::new("Mission settings…", true, None);
     let updates = MenuItem::new("Check for updates…", true, None);
+    let about = MenuItem::new("About Houston", true, None);
     let drills_sep = PredefinedMenuItem::separator();
     let menu = Menu::with_items(&[
         &dnd,
@@ -795,6 +801,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         &PredefinedMenuItem::separator(),
         &prefs,
         &updates,
+        &about,
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::quit(Some("Quit Houston (splashdown)")),
     ])
@@ -807,6 +814,7 @@ fn build_menu(config: &Config) -> (Menu, MenuIds, MenuItems) {
         config: open_config.id().clone(),
         prefs: prefs.id().clone(),
         updates: updates.id().clone(),
+        about: about.id().clone(),
     };
     if config.demo.autoplay {
         let _ = menu.insert_items(&[&demo, &drills_sep], 0);
@@ -853,6 +861,14 @@ fn main() {
         // The stdio MCP bridge for agents, not the app.
         Some("mcp") => std::process::exit(mcp::stdio_bridge()),
         Some("--version" | "-V") => return println!("houston {VERSION}"),
+        // For bundle.sh: the app icon at 1024 px, to make the .icns from.
+        Some("--app-icon") => {
+            let path = std::env::args()
+                .nth(2)
+                .expect("usage: houston --app-icon <file.png>");
+            std::fs::write(&path, icon::app_icon_png(1024)).expect("write the icon");
+            return;
+        }
         _ => {}
     }
     log::init();
