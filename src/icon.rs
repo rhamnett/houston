@@ -1,10 +1,55 @@
-//! The status item icon: a capsule hanging from the top edge, like the island
-//! under the notch, drawn in code as a template image so macOS tints it.
+//! Houston's icons, drawn in code.
+//!
+//! - [`island`]: the menu bar glyph, a capsule hanging from the top edge like
+//!   the island under the notch, as a template image so macOS tints it
+//! - [`app_icon_png`]: the "Splashdown" app icon, for the About panel and the
+//!   bundle (`houston --app-icon <file.png>`, used by bundle.sh): the island
+//!   dropping out of the notch, glowing amber, with signal rings under it
+//!
+//! The app icon's shapes are signed distance functions (negative inside), so
+//! every size is antialiased from one description without an image library.
 
 use tray_icon::Icon;
 
+/// The menu bar glyph: 18 pt at 2x.
 const SIZE: u32 = 36;
 const SAMPLES: u32 = 4;
+
+/// Distance from `(x, y)` to a rectangle `x0..x1` × `y0..y1` with corners
+/// rounded by `r`.
+fn rounded_rect(x: f64, y: f64, (x0, y0, x1, y1): (f64, f64, f64, f64), r: f64) -> f64 {
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let qx = (x - cx).abs() - ((x1 - x0) / 2.0 - r);
+    let qy = (y - cy).abs() - ((y1 - y0) / 2.0 - r);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+}
+
+fn circle(x: f64, y: f64, (cx, cy): (f64, f64), r: f64) -> f64 {
+    (x - cx).hypot(y - cy) - r
+}
+
+/// Distance to the lower arc of a circle (y grows downwards) between the
+/// angles whose sine is `rise`, i.e. from `asin(rise)` to `π - asin(rise)`,
+/// stroked `width` wide with round caps.
+fn lower_arc(x: f64, y: f64, (cx, cy): (f64, f64), r: f64, rise: f64, width: f64) -> f64 {
+    let (dx, dy) = (x - cx, y - cy);
+    let d = dx.hypot(dy);
+    let on_arc = if dy >= rise * d {
+        (d - r).abs()
+    } else {
+        let ex = r * (1.0 - rise * rise).sqrt();
+        let end = (rise * r) + cy;
+        (x - (cx - ex))
+            .hypot(y - end)
+            .min((x - (cx + ex)).hypot(y - end))
+    };
+    on_arc - width / 2.0
+}
+
+/// How much of a pixel a shape covers, from its distance in pixels.
+fn cover(distance_px: f64) -> f64 {
+    (0.5 - distance_px).clamp(0.0, 1.0)
+}
 
 /// Unit coordinates: x in -0.5..0.5, y from 0 (bottom) to 1 (top).
 fn covered(x: f64, y: f64) -> bool {
@@ -19,53 +64,105 @@ fn covered(x: f64, y: f64) -> bool {
     bar || (capsule && !dot)
 }
 
-/// How much of each pixel of a `size`² image `inside` covers, 0 to 255.
-fn coverage(size: u32, inside: impl Fn(f64, f64) -> bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity((size * size) as usize);
-    for py in 0..size {
-        for px in 0..size {
+pub fn rgba() -> Vec<u8> {
+    let mut out = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for py in 0..SIZE {
+        for px in 0..SIZE {
             let mut hits = 0;
             for sy in 0..SAMPLES {
                 for sx in 0..SAMPLES {
-                    let x = (px as f64 + (sx as f64 + 0.5) / SAMPLES as f64) / size as f64 - 0.5;
-                    let y = 1.0 - (py as f64 + (sy as f64 + 0.5) / SAMPLES as f64) / size as f64;
-                    if inside(x, y) {
+                    let x = (px as f64 + (sx as f64 + 0.5) / SAMPLES as f64) / SIZE as f64 - 0.5;
+                    let y = 1.0 - (py as f64 + (sy as f64 + 0.5) / SAMPLES as f64) / SIZE as f64;
+                    if covered(x, y) {
                         hits += 1;
                     }
                 }
             }
-            out.push((hits * 255 / (SAMPLES * SAMPLES)) as u8);
+            out.extend([0, 0, 0, (hits * 255 / (SAMPLES * SAMPLES)) as u8]);
         }
     }
     out
 }
 
-pub fn rgba() -> Vec<u8> {
-    coverage(SIZE, covered)
-        .into_iter()
-        .flat_map(|a| [0, 0, 0, a])
-        .collect()
+pub fn island() -> Option<Icon> {
+    Icon::from_rgba(rgba(), SIZE, SIZE).ok()
 }
 
-/// A rounded square inset like a macOS app icon.
-fn tile(x: f64, y: f64) -> bool {
-    let (half, r) = (0.41, 0.09);
-    let (u, v) = (x.abs(), (y - 0.5).abs());
-    let (dx, dy) = ((u - (half - r)).max(0.0), (v - (half - r)).max(0.0));
-    u <= half && v <= half && dx * dx + dy * dy <= r * r
+type Rgb = [f64; 3];
+
+fn hex(c: u32) -> Rgb {
+    [(c >> 16) & 255, (c >> 8) & 255, c & 255].map(|v| v as f64 / 255.0)
 }
 
-/// The app icon, for the About panel: the glyph in white on a black tile,
-/// the colours of the island itself. A PNG, `size` pixels square.
+fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+    let t = t.clamp(0.0, 1.0);
+    [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Premultiplied RGBA, painted back to front.
+struct Paint([f64; 4]);
+
+impl Paint {
+    fn over(&mut self, color: Rgb, alpha: f64) {
+        let a = alpha.clamp(0.0, 1.0);
+        for (i, c) in color.iter().enumerate() {
+            self.0[i] = c * a + self.0[i] * (1.0 - a);
+        }
+        self.0[3] = a + self.0[3] * (1.0 - a);
+    }
+}
+
+/// The app icon's colour at `(x, y)` on a 512-unit grid (the macOS icon
+/// grid: a 412-unit tile inset 50), `px` units to a pixel.
+fn splashdown(x: f64, y: f64, px: f64) -> [f64; 4] {
+    let amber = |x: f64| mix(hex(0xffc247), hex(0xff6a1f), (x - 136.0) / 240.0);
+    let ink = hex(0x1f1206);
+    let tile = cover(rounded_rect(x, y, (50.0, 50.0, 462.0, 462.0), 92.0) / px);
+    let mut p = Paint([0.0; 4]);
+    p.over(mix(hex(0x1b2436), hex(0x07090f), (y - 50.0) / 412.0), tile);
+    // The notch, cut into the top edge.
+    let notch = rounded_rect(x, y, (166.0, -100.0, 346.0, 120.0), 28.0);
+    p.over([0.0; 3], tile * cover(notch / px));
+    // The island's glow: its outline, blurred.
+    let island = rounded_rect(x, y, (136.0, 200.0, 376.0, 292.0), 46.0);
+    let glow = 0.6 / (1.0 + (1.7 * island / 14.0).exp());
+    p.over(hex(0xff8a1f), tile * glow);
+    p.over(amber(x), cover(island / px));
+    p.over(ink, cover(circle(x, y, (182.0, 246.0), 17.0) / px));
+    p.over(
+        ink,
+        0.5 * cover(rounded_rect(x, y, (216.0, 238.0, 338.0, 254.0), 8.0) / px),
+    );
+    // Signal rings under it, fading out.
+    for (r, width, alpha) in [(56.0, 12.0, 0.55), (92.0, 10.0, 0.32), (128.0, 8.0, 0.16)] {
+        let ring = lower_arc(x, y, (256.0, 292.0), r, 0.5, width);
+        p.over(hex(0xff9a2e), alpha * tile * cover(ring / px));
+    }
+    p.0
+}
+
+/// The app icon as a PNG, `size` pixels square.
 pub fn app_icon_png(size: u32) -> Vec<u8> {
-    let tile = coverage(size, tile);
-    // The glyph spans y 0.39..0.88; scale it to 70% and centre it.
-    let glyph = coverage(size, |x, y| covered(x / 0.7, (y - 0.5) / 0.7 + 0.635));
-    let rgba: Vec<u8> = tile
-        .iter()
-        .zip(&glyph)
-        .flat_map(|(&a, &g)| [g, g, g, a])
-        .collect();
+    let px = 512.0 / size as f64;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for row in 0..size {
+        for col in 0..size {
+            let [r, g, b, a] = splashdown((col as f64 + 0.5) * px, (row as f64 + 0.5) * px, px);
+            let straight = |c: f64| {
+                if a > 0.0 {
+                    (c / a * 255.0).round().clamp(0.0, 255.0) as u8
+                } else {
+                    0
+                }
+            };
+            rgba.extend([
+                straight(r),
+                straight(g),
+                straight(b),
+                (a * 255.0).round() as u8,
+            ]);
+        }
+    }
     png(size, &rgba)
 }
 
@@ -127,10 +224,6 @@ fn png(size: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn island() -> Option<Icon> {
-    Icon::from_rgba(rgba(), SIZE, SIZE).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +235,20 @@ mod tests {
         assert_eq!(alpha(0, SIZE - 1), 0, "bottom corner is clear");
         assert_eq!(alpha(SIZE / 2 + 6, 16), 255, "capsule body");
         assert_eq!(alpha(SIZE / 2 - 5, 16), 0, "dot is cut out");
+    }
+
+    #[test]
+    fn app_icon_colours() {
+        let at = |x: f64, y: f64| splashdown(x, y, 1.0);
+        assert_eq!(at(20.0, 20.0)[3], 0.0, "outside the tile");
+        let notch = at(256.0, 70.0);
+        assert!(
+            notch[..3].iter().all(|&c| c < 0.01),
+            "the notch is black: {notch:?}"
+        );
+        let island = at(300.0, 220.0);
+        assert!(island[0] > 0.95 && island[2] < 0.3, "amber: {island:?}");
+        assert!(at(182.0, 246.0)[0] < 0.2, "the dot is dark");
     }
 
     #[test]

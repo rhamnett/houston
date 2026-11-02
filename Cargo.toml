@@ -12,8 +12,13 @@ libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
+    "NSAttributedString",
+    "NSColor",
     "NSEvent",
+    "NSFont",
     "NSImage",
+    "NSParagraphStyle",
+    "NSText",
     "NSGraphics",
     "NSResponder",
     "NSScreen",
@@ -28,6 +33,7 @@ objc2-foundation = { version = "0.3", features = [
     "NSDictionary",
     "NSGeometry",
     "NSString",
+    "NSURL",
 ] }
 ring = "0.17.14"
 security-framework = "3.7.0"

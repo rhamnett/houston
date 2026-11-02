@@ -861,6 +861,14 @@ fn main() {
         // The stdio MCP bridge for agents, not the app.
         Some("mcp") => std::process::exit(mcp::stdio_bridge()),
         Some("--version" | "-V") => return println!("houston {VERSION}"),
+        // For bundle.sh: the app icon at 1024 px, to make the .icns from.
+        Some("--app-icon") => {
+            let path = std::env::args()
+                .nth(2)
+                .expect("usage: houston --app-icon <file.png>");
+            std::fs::write(&path, icon::app_icon_png(1024)).expect("write the icon");
+            return;
+        }
         _ => {}
     }
     log::init();
