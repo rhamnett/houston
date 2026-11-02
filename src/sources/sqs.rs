@@ -65,42 +65,39 @@ impl Sqs {
             self.config.region.as_deref(),
             None,
         )
+        .map(|c| c.with_region_from(&self.config.queue_url))
+    }
+
+    fn call(&self, action: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+        aws::call(
+            self.cli.as_deref(),
+            &self.creds()?,
+            aws::Service::Sqs,
+            action,
+            body,
+        )
     }
 
     fn receive(&self) -> Result<Vec<Message>, String> {
-        let wait = self.config.wait_secs.clamp(1, 20).to_string();
-        let args = vec![
-            "sqs",
-            "receive-message",
-            "--queue-url",
-            &self.config.queue_url,
-            "--max-number-of-messages",
-            "10",
-            "--wait-time-seconds",
-            &wait,
-            "--output",
-            "json",
-        ];
-        let out = aws::cli(self.cli.as_deref(), &args, &self.creds()?)?;
-        // The CLI prints nothing when the queue was empty.
-        if out.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+        let answer = self.call(
+            "ReceiveMessage",
+            &serde_json::json!({
+                "QueueUrl": self.config.queue_url,
+                "MaxNumberOfMessages": 10,
+                "WaitTimeSeconds": self.config.wait_secs.clamp(1, 20),
+            }),
+        )?;
         let r: Received =
-            serde_json::from_str(&out).map_err(|e| format!("receive-message: {e}"))?;
+            serde_json::from_value(answer).map_err(|e| format!("ReceiveMessage: {e}"))?;
         Ok(r.messages)
     }
 
     fn delete(&self, receipt: &str) -> Result<(), String> {
-        let args = vec![
-            "sqs",
-            "delete-message",
-            "--queue-url",
-            &self.config.queue_url,
-            "--receipt-handle",
-            receipt,
-        ];
-        aws::cli(self.cli.as_deref(), &args, &self.creds()?).map(|_| ())
+        self.call(
+            "DeleteMessage",
+            &serde_json::json!({"QueueUrl": self.config.queue_url, "ReceiptHandle": receipt}),
+        )
+        .map(|_| ())
     }
 }
 

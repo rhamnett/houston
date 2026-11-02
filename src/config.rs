@@ -265,7 +265,8 @@ pub struct Config {
     pub follow_focus: bool,
     #[serde(default = "yes")]
     pub sounds: bool,
-    /// Path to the aws binary if it is not in the usual places.
+    /// Path to the aws binary if it is not in the usual places. Only SSO and
+    /// role profiles use it, to fetch their keys.
     #[serde(default)]
     pub aws_cli: Option<String>,
     #[serde(default)]

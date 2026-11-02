@@ -17,6 +17,7 @@ mod notify;
 mod overlay;
 mod prefs;
 mod secrets;
+mod sigv4;
 mod source;
 mod sources;
 mod store;

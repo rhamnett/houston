@@ -15,7 +15,8 @@ trait.
 ## Quick start
 
 You need macOS 12 or later and a Rust toolchain (1.88 or later, for let
-chains). The AWS CLI v2 is needed only for the AWS sources.
+chains). The AWS sources talk to AWS directly; the AWS CLI v2 is needed only
+for SSO or role profiles.
 
 ```bash
 git clone https://github.com/rhamnett/houston.git
@@ -206,10 +207,11 @@ Built in:
 | `linear`     | your Linear issues, and urgent ones in the teams you watch         | off     |
 | `iot`        | **stub**: AWS IoT Core MQTT subscriber (live call events)          | off     |
 
-The AWS sources shell out to the `aws` CLI, signed with an IAM access key
+The AWS sources call CloudWatch and SQS directly over HTTPS (their JSON
+protocol, signed with Signature V4 in `src/sigv4.rs`), as an IAM access key
 from the Keychain or a CLI profile. When credentials stop working, a "Lost
 signal" island says why. `src/aws.rs` maps three payload shapes to the
-same alarm island: `describe-alarms` rows, EventBridge
+same alarm island: DescribeAlarms rows, EventBridge
 `CloudWatch Alarm State Change` events, and SNS alarm notifications (raw or in
 an SNS envelope). It also maps Security Hub findings (`Security Hub Findings -
 Imported`, raw or in an SNS envelope) to one island per finding.
@@ -309,12 +311,14 @@ in Mission settings:
 
 - **IAM access key** (the default, and recommended): a long-lived key for a
   read-only user. The key ID goes in the config file and the secret key goes
-  in the Keychain (as `aws-secret:<key id>`). Both reach the AWS CLI through
-  environment variables, never as command-line arguments. Removing the
+  in the Keychain (as `aws-secret:<key id>`). It never leaves Houston: requests
+  are signed in-process, and nothing else needs installing. Removing the
   account removes its secret too.
 - **CLI profile**: any profile in `~/.aws/config`, offered as you type, with
-  keys in `~/.aws/credentials` or a `credential_process`. SSO profiles work,
-  but their sessions expire within hours and polling stops until you run
+  keys in `~/.aws/credentials` or a `credential_process`, read directly. For
+  SSO or role profiles Houston asks the AWS CLI for keys
+  (`aws configure export-credentials`), so those need it installed. SSO
+  sessions expire within hours and polling stops until you run
   `aws sso login` again, so Mission settings warns when you pick one.
 
 ```json
@@ -505,7 +509,8 @@ the terminal otherwise.
 - `src/store.rs`: active islands, expiry, snooze, dismissal, ordering
 - `src/source.rs`: the `Source` trait, `Sink` and `Registry`
 - `src/sources/`: `demo`, `local_api`, `cloudwatch`, `sqs`, `linear`, `updates`, `iot` (stub)
-- `src/aws.rs`: the AWS CLI runner, the alarm and findings mappers, alarm rules
+- `src/aws.rs`: signed CloudWatch and SQS calls, credentials, the alarm and findings mappers, alarm rules
+- `src/sigv4.rs`: AWS Signature Version 4
 - `src/overlay.rs`: the overlay window and the island page (HTML/CSS/JS)
 - `src/notch.rs`: notch geometry, window level and Spaces, the hover monitor
 - `src/prefs.rs`: the Mission settings window and its page

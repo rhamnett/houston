@@ -20,6 +20,7 @@ objc2-app-kit = { version = "0.3", features = [
     "block2",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry", "NSString"] }
+ring = "0.17.14"
 security-framework = "3.7.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

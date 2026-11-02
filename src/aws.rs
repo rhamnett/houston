@@ -1,8 +1,9 @@
-//! Everything that knows about AWS: running the `aws` CLI (so CLI profiles and
-//! credential processes just work) and turning CloudWatch alarm payloads into
-//! islands. Three payload shapes are understood:
+//! Everything that knows about AWS: signed calls to CloudWatch and SQS over
+//! their JSON protocol (no AWS SDK, and the `aws` CLI only for SSO or role
+//! profiles) and turning CloudWatch alarm payloads into islands. Three
+//! payload shapes are understood:
 //!
-//! - rows from `aws cloudwatch describe-alarms`
+//! - rows from DescribeAlarms
 //! - EventBridge `CloudWatch Alarm State Change` events
 //! - SNS alarm notifications, raw or inside an SNS envelope
 //!
@@ -13,14 +14,20 @@
 //! Imported`, raw or inside an SNS envelope) and applies the `alarm_rules`
 //! from the config.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::config::{AlarmRule, AwsAuth};
 use crate::island::{Action, Island, Kind, Severity};
 use crate::secrets;
+use crate::sigv4::{self, Keys};
 
 /// One alarm's state, whichever way it reached us.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -48,6 +55,7 @@ struct DescribeAlarms {
     metric_alarms: Vec<DescribedAlarm>,
     #[serde(default)]
     composite_alarms: Vec<DescribedAlarm>,
+    next_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -58,11 +66,33 @@ struct DescribedAlarm {
     alarm_description: Option<String>,
     state_value: String,
     state_reason: Option<String>,
+    #[serde(default, deserialize_with = "timestamp")]
     state_updated_timestamp: Option<String>,
     metric_name: Option<String>,
     namespace: Option<String>,
     comparison_operator: Option<String>,
     threshold: Option<f64>,
+}
+
+/// The JSON protocol sends epoch seconds; the CLI printed ISO 8601. Both
+/// become the CLI's form, so an island's revision (and so whether it's news)
+/// doesn't change with the transport.
+fn timestamp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stamp {
+        Text(String),
+        Seconds(f64),
+    }
+    Ok(match Option::<Stamp>::deserialize(d)? {
+        Some(Stamp::Text(t)) => Some(t),
+        Some(Stamp::Seconds(s)) => {
+            let micros = (s * 1e6).round() as i64;
+            DateTime::from_timestamp_micros(micros)
+                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Micros, false))
+        }
+        None => None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -154,11 +184,16 @@ fn arn_parts(arn: Option<&str>) -> (Option<String>, Option<String>) {
     (region, account)
 }
 
-/// Parse `describe-alarms --output json`.
+/// Parse a DescribeAlarms answer (or `aws cloudwatch describe-alarms`).
+#[cfg(test)]
 pub fn parse_describe_alarms(json: &str) -> Result<Vec<AlarmState>, String> {
     let d: DescribeAlarms =
         serde_json::from_str(json).map_err(|e| format!("describe-alarms: {e}"))?;
-    Ok(d.metric_alarms
+    Ok(alarm_states(d))
+}
+
+fn alarm_states(d: DescribeAlarms) -> Vec<AlarmState> {
+    d.metric_alarms
         .into_iter()
         .chain(d.composite_alarms)
         .map(|a| {
@@ -178,7 +213,7 @@ pub fn parse_describe_alarms(json: &str) -> Result<Vec<AlarmState>, String> {
                 threshold: a.threshold,
             }
         })
-        .collect())
+        .collect()
 }
 
 /// An alarm from an SQS body or a webhook: an SNS envelope, an EventBridge
@@ -608,33 +643,87 @@ impl Creds {
     }
 }
 
-/// Run the AWS CLI as `creds` and return stdout. Access keys go in the
-/// environment, never on the command line where `ps` would show them. Login
-/// items start with a bare PATH, so the usual install locations are added for
-/// credential helpers.
-pub fn cli(binary: Option<&str>, args: &[&str], creds: &Creds) -> Result<String, String> {
-    let bin = binary.map(PathBuf::from).unwrap_or_else(find_cli);
+/// Where the profile and region settings live: `AWS_CONFIG_FILE` and
+/// `AWS_SHARED_CREDENTIALS_FILE`, else ~/.aws/config and ~/.aws/credentials.
+fn aws_file(var: &str, name: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".aws").join(name)))
+}
+
+/// The `key = value` lines of the INI section headed `[section]`.
+fn ini_section(text: &str, section: &str) -> BTreeMap<String, String> {
+    let mut inside = false;
+    let mut out = BTreeMap::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            inside = header.split_whitespace().collect::<Vec<_>>().join(" ") == section;
+        } else if inside
+            && !line.starts_with(['#', ';'])
+            && let Some((k, v)) = line.split_once('=')
+        {
+            out.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    out
+}
+
+/// A profile's settings: ~/.aws/config, then ~/.aws/credentials on top.
+fn profile_settings(name: &str) -> BTreeMap<String, String> {
+    let read = |var, file| {
+        aws_file(var, file)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default()
+    };
+    merge_settings(
+        &read("AWS_CONFIG_FILE", "config"),
+        &read("AWS_SHARED_CREDENTIALS_FILE", "credentials"),
+        name,
+    )
+}
+
+/// `[profile x]` (`[default]`) in the config, `[x]` in the credentials file.
+fn merge_settings(config: &str, credentials: &str, name: &str) -> BTreeMap<String, String> {
+    let section = if name == "default" {
+        "default".to_string()
+    } else {
+        format!("profile {name}")
+    };
+    let mut settings = ini_section(config, &section);
+    settings.extend(ini_section(credentials, name));
+    settings
+}
+
+/// The JSON a `credential_process` prints, and so does
+/// `aws configure export-credentials --format process`.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ProcessCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    expiration: Option<String>,
+}
+
+/// Keys and when they expire (`None`: they don't).
+type Expiring = (Keys, Option<DateTime<Utc>>);
+
+/// Temporary keys by profile, until a few minutes before they expire.
+static TEMPORARY: Mutex<BTreeMap<String, Expiring>> = Mutex::new(BTreeMap::new());
+
+/// Login items start with a bare PATH, so the usual install locations are
+/// added for the CLI and credential helpers.
+fn run(mut cmd: Command, what: &str) -> Result<String, String> {
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}",
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut cmd = Command::new(&bin);
-    cmd.args(args).env("PATH", path).env("AWS_PAGER", "");
-    if let Some(p) = &creds.profile {
-        cmd.args(["--profile", p]);
-    }
-    if let Some(r) = &creds.region {
-        cmd.args(["--region", r]);
-    }
-    if let Some((id, secret)) = &creds.access_key {
-        cmd.env("AWS_ACCESS_KEY_ID", id)
-            .env("AWS_SECRET_ACCESS_KEY", secret)
-            .env_remove("AWS_SESSION_TOKEN")
-            .env_remove("AWS_PROFILE");
-    }
     let out = cmd
+        .env("PATH", path)
+        .env("AWS_PAGER", "")
         .output()
-        .map_err(|e| format!("{}: {e}", display(&bin)))?;
+        .map_err(|e| format!("{what}: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let line = err
@@ -647,8 +736,267 @@ pub fn cli(binary: Option<&str>, args: &[&str], creds: &Creds) -> Result<String,
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
 }
 
-fn display(p: &Path) -> String {
-    p.display().to_string()
+/// Keys for a profile. Static keys and `credential_process` are handled
+/// here; anything else (SSO, an assumed role) is handed to the AWS CLI, which
+/// knows how to refresh them.
+fn profile_keys(binary: Option<&str>, name: &str) -> Result<Keys, String> {
+    let settings = profile_settings(name);
+    if let (Some(id), Some(secret)) = (
+        settings.get("aws_access_key_id"),
+        settings.get("aws_secret_access_key"),
+    ) {
+        return Ok(Keys {
+            id: id.clone(),
+            secret: secret.clone(),
+            token: settings.get("aws_session_token").cloned(),
+        });
+    }
+    let mut cache = TEMPORARY.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = |expires: &Option<DateTime<Utc>>| {
+        expires.is_none_or(|t| t - chrono::Duration::minutes(5) > Utc::now())
+    };
+    if let Some((keys, expires)) = cache.get(name)
+        && fresh(expires)
+    {
+        return Ok(keys.clone());
+    }
+    let json = if let Some(process) = settings.get("credential_process") {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", process]);
+        run(cmd, "credential_process")?
+    } else {
+        let bin = binary.map(PathBuf::from).unwrap_or_else(find_cli);
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "configure",
+            "export-credentials",
+            "--profile",
+            name,
+            "--format",
+            "process",
+        ]);
+        run(cmd, &bin.display().to_string()).map_err(|e| {
+            if e.contains("No such file") {
+                format!(
+                    "profile {name} has no keys of its own (SSO or a role?), which needs the \
+                     AWS CLI: install it, or use an access key instead"
+                )
+            } else {
+                e
+            }
+        })?
+    };
+    let c: ProcessCredentials =
+        serde_json::from_str(&json).map_err(|e| format!("credentials for {name}: {e}"))?;
+    let keys = Keys {
+        id: c.access_key_id,
+        secret: c.secret_access_key,
+        token: c.session_token.filter(|t| !t.is_empty()),
+    };
+    let expires = c
+        .expiration
+        .and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
+        .map(|t| t.with_timezone(&Utc));
+    cache.insert(name.to_string(), (keys.clone(), expires));
+    Ok(keys)
+}
+
+impl Creds {
+    fn profile_name(&self) -> String {
+        self.profile
+            .clone()
+            .or_else(|| std::env::var("AWS_PROFILE").ok())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "default".into())
+    }
+
+    fn keys(&self, binary: Option<&str>) -> Result<Keys, String> {
+        match &self.access_key {
+            Some((id, secret)) => Ok(Keys {
+                id: id.clone(),
+                secret: secret.clone(),
+                token: None,
+            }),
+            None => profile_keys(binary, &self.profile_name()),
+        }
+    }
+
+    /// The account's region, else the profile's, else `AWS_REGION`.
+    fn region(&self) -> Result<String, String> {
+        self.region
+            .clone()
+            .or_else(|| {
+                self.access_key
+                    .is_none()
+                    .then(|| profile_settings(&self.profile_name()).remove("region"))
+                    .flatten()
+            })
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| "no region: set one for this account".to_string())
+    }
+
+    /// The same, with the region read from an SQS queue URL if none is set
+    /// (`https://sqs.eu-west-2.amazonaws.com/…`).
+    pub fn with_region_from(mut self, url: &str) -> Self {
+        if self.region.is_none() {
+            self.region = queue_region(url);
+        }
+        self
+    }
+}
+
+fn queue_region(url: &str) -> Option<String> {
+    let host = url.strip_prefix("https://")?.split('/').next()?;
+    let mut labels = host.split('.');
+    let first = labels.next()?;
+    // sqs.<region>.amazonaws.com, or the legacy <region>.queue.amazonaws.com.
+    let region = if first == "sqs" {
+        labels.next()?
+    } else {
+        first
+    };
+    region.contains('-').then(|| region.to_string())
+}
+
+/// An AWS service spoken to over its JSON protocol.
+#[derive(Debug, Clone, Copy)]
+pub enum Service {
+    CloudWatch,
+    Sqs,
+}
+
+impl Service {
+    /// (endpoint prefix and signing name, X-Amz-Target prefix)
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Service::CloudWatch => ("monitoring", "GraniteServiceVersion20100801"),
+            Service::Sqs => ("sqs", "AmazonSQS"),
+        }
+    }
+}
+
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            // Past SQS's longest long poll (20s).
+            .timeout_global(Some(Duration::from_secs(40)))
+            .http_status_as_error(false)
+            .build()
+            .into()
+    })
+}
+
+/// "AccessDeniedException: User … is not authorized" from an error body.
+fn error_message(status: u16, body: &str) -> String {
+    let v: Value = serde_json::from_str(body).unwrap_or_default();
+    let code = v["__type"]
+        .as_str()
+        .or(v["code"].as_str())
+        .map(|t| t.rsplit('#').next().unwrap_or(t));
+    let message = v["message"].as_str().or(v["Message"].as_str());
+    match (code, message) {
+        (Some(c), Some(m)) => format!("{c}: {m}"),
+        (Some(c), None) => c.to_string(),
+        (None, Some(m)) => m.to_string(),
+        (None, None) => format!("AWS answered {status}"),
+    }
+}
+
+/// One signed call, e.g. `call(None, &creds, Service::Sqs, "ReceiveMessage",
+/// &json!({...}))`, returning the JSON answer. `binary` is the AWS CLI, used
+/// only to fetch keys for an SSO or role profile.
+pub fn call(
+    binary: Option<&str>,
+    creds: &Creds,
+    service: Service,
+    action: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let (prefix, target) = service.names();
+    let region = creds.region()?;
+    let keys = creds.keys(binary)?;
+    let domain = if region.starts_with("cn-") {
+        "amazonaws.com.cn"
+    } else {
+        "amazonaws.com"
+    };
+    let host = format!("{prefix}.{region}.{domain}");
+    let body = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+    let target = format!("{target}.{action}");
+    let headers = [
+        ("content-type", "application/x-amz-json-1.0"),
+        ("x-amz-target", target.as_str()),
+    ];
+    let req = sigv4::Request {
+        method: "POST",
+        host: &host,
+        path: "/",
+        query: "",
+        headers: &headers,
+        body: &body,
+    };
+    let mut request = agent().post(format!("https://{host}/"));
+    for (k, v) in headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .chain(sigv4::sign(&req, &keys, &region, prefix, Utc::now()))
+    {
+        request = request.header(&k, &v);
+    }
+    let mut response = request
+        .send(&body[..])
+        .map_err(|e| format!("{host}: {e}"))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("{host}: {e}"))?;
+    if status != 200 {
+        return Err(error_message(status, &text));
+    }
+    // SQS answers an empty receive with `{}`; never with nothing, but be kind.
+    if text.trim().is_empty() {
+        return Ok(Value::Object(Default::default()));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("{action}: {e}"))
+}
+
+/// Every alarm (metric and composite, any state), optionally under a name
+/// prefix, following `NextToken` across pages.
+pub fn describe_alarms(
+    binary: Option<&str>,
+    creds: &Creds,
+    prefix: Option<&str>,
+) -> Result<Vec<AlarmState>, String> {
+    let mut alarms = Vec::new();
+    let mut next: Option<String> = None;
+    // 100 a page, so this is 10,000 alarms: plenty, and never a runaway.
+    for _ in 0..100 {
+        let mut body = json!({"AlarmTypes": ["MetricAlarm", "CompositeAlarm"], "MaxRecords": 100});
+        if let Some(p) = prefix.filter(|p| !p.is_empty()) {
+            body["AlarmNamePrefix"] = p.into();
+        }
+        if let Some(token) = next.take() {
+            body["NextToken"] = token.into();
+        }
+        let page: DescribeAlarms = serde_json::from_value(call(
+            binary,
+            creds,
+            Service::CloudWatch,
+            "DescribeAlarms",
+            &body,
+        )?)
+        .map_err(|e| format!("DescribeAlarms: {e}"))?;
+        next = page.next_token.clone().filter(|t| !t.is_empty());
+        alarms.extend(alarm_states(page));
+        if next.is_none() {
+            break;
+        }
+    }
+    Ok(alarms)
 }
 
 /// A profile in ~/.aws/config, for the picker in Preferences.
@@ -724,20 +1072,7 @@ pub fn discover_alarms(
     creds: &Creds,
     prefix: Option<&str>,
 ) -> Result<Vec<Discovered>, String> {
-    let mut args = vec![
-        "cloudwatch",
-        "describe-alarms",
-        "--alarm-types",
-        "MetricAlarm",
-        "CompositeAlarm",
-        "--output",
-        "json",
-    ];
-    if let Some(p) = prefix.filter(|p| !p.is_empty()) {
-        args.extend(["--alarm-name-prefix", p]);
-    }
-    let out = cli(binary, &args, creds)?;
-    let mut found: Vec<Discovered> = parse_describe_alarms(&out)?
+    let mut found: Vec<Discovered> = describe_alarms(binary, creds, prefix)?
         .into_iter()
         .map(|a| Discovered {
             metric: a.condition(),
@@ -755,6 +1090,102 @@ mod tests {
     use super::*;
 
     const DESCRIBE: &str = r#"{"MetricAlarms":[{"AlarmName":"prod api 5xx","AlarmArn":"arn:aws:cloudwatch:eu-west-2:123456789012:alarm:prod api 5xx","StateValue":"ALARM","StateReason":"Threshold Crossed: 3 datapoints","StateUpdatedTimestamp":"2026-10-30T10:00:00Z","MetricName":"HTTPCode_Target_5XX_Count","Namespace":"AWS/ApplicationELB","ComparisonOperator":"GreaterThanThreshold","Threshold":50.0}],"CompositeAlarms":[]}"#;
+
+    /// Against real AWS: `HOUSTON_LIVE_PROFILE=<profile> cargo test live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_describe_alarms() {
+        let profile = std::env::var("HOUSTON_LIVE_PROFILE").expect("HOUSTON_LIVE_PROFILE");
+        let region = std::env::var("HOUSTON_LIVE_REGION").ok();
+        let c = Creds::resolve(&AwsAuth::Profile, Some(&profile), region.as_deref(), None).unwrap();
+        let alarms = describe_alarms(None, &c, None).unwrap();
+        let firing = alarms.iter().filter(|a| a.state == "ALARM").count();
+        println!("{profile}: {} alarms, {firing} in ALARM", alarms.len());
+        assert!(alarms.iter().all(|a| a.updated.is_some()));
+    }
+
+    #[test]
+    fn json_protocol_pages() {
+        let page = r#"{"MetricAlarms":[{"AlarmName":"a","StateValue":"OK","StateUpdatedTimestamp":1.7617944001234E9}],"NextToken":"n2"}"#;
+        let d: DescribeAlarms = serde_json::from_str(page).unwrap();
+        assert_eq!(d.next_token.as_deref(), Some("n2"));
+        let a = &alarm_states(d)[0];
+        // The CLI's form, so revisions match what older builds saw.
+        assert_eq!(
+            a.updated.as_deref(),
+            Some("2025-10-30T03:20:00.123400+00:00")
+        );
+    }
+
+    #[test]
+    fn profiles_and_credentials_files() {
+        let config = "[default]\nregion = us-east-1\n\n[profile  ops ]\nregion=eu-west-2\n# aws_access_key_id = commented\n[sso-session ops]\nsso_region = eu-west-1\n";
+        let credentials = "[ops]\naws_access_key_id = AKIAOPS\naws_secret_access_key = s3cret\n[default]\naws_access_key_id = AKIADEF\n";
+        let ops = merge_settings(config, credentials, "ops");
+        assert_eq!(ops.get("region").map(String::as_str), Some("eu-west-2"));
+        assert_eq!(
+            ops.get("aws_access_key_id").map(String::as_str),
+            Some("AKIAOPS")
+        );
+        assert!(!ops.contains_key("sso_region"), "{ops:?}");
+        let default = merge_settings(config, credentials, "default");
+        assert_eq!(default.get("region").map(String::as_str), Some("us-east-1"));
+        assert!(merge_settings(config, credentials, "nope").is_empty());
+    }
+
+    #[test]
+    fn queue_regions() {
+        let r = |u| queue_region(u);
+        assert_eq!(
+            r("https://sqs.eu-west-2.amazonaws.com/123456789012/q").as_deref(),
+            Some("eu-west-2")
+        );
+        assert_eq!(
+            r("https://us-east-1.queue.amazonaws.com/1/q").as_deref(),
+            Some("us-east-1")
+        );
+        assert_eq!(r("http://localhost:9324/q"), None);
+    }
+
+    #[test]
+    fn aws_error_bodies() {
+        assert_eq!(
+            error_message(
+                400,
+                r#"{"__type":"com.amazonaws.cloudwatch#AccessDenied","message":"no"}"#
+            ),
+            "AccessDenied: no"
+        );
+        assert_eq!(
+            error_message(
+                400,
+                r#"{"__type":"InvalidClientTokenId","Message":"bad key"}"#
+            ),
+            "InvalidClientTokenId: bad key"
+        );
+        assert_eq!(error_message(503, "<html>"), "AWS answered 503");
+    }
+
+    #[test]
+    fn regions_come_from_the_account_first() {
+        let c = Creds::resolve(
+            &AwsAuth::AccessKey {
+                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            },
+            None,
+            Some("eu-west-2"),
+            Some("secret"),
+        )
+        .unwrap();
+        assert_eq!(c.region().unwrap(), "eu-west-2");
+        let keys = c.keys(None).unwrap();
+        assert_eq!(
+            (keys.id.as_str(), keys.token),
+            ("AKIAIOSFODNN7EXAMPLE", None)
+        );
+        let sqs = Creds::default().with_region_from("https://sqs.ap-south-1.amazonaws.com/1/q");
+        assert_eq!(sqs.region.as_deref(), Some("ap-south-1"));
+    }
 
     #[test]
     fn describe_alarms_rows() {

@@ -1,9 +1,9 @@
-//! Polls `aws cloudwatch describe-alarms` for each configured profile and
-//! region. New alarms in ALARM appear as critical islands; an alarm that drops
-//! out of ALARM gets a short "OK" island. Every alarm checked, in any state,
-//! goes to the watch list in the expanded island. Uses the AWS CLI, so
-//! a CLI profile works; the recommended way is an IAM access key whose secret
-//! is in the Keychain, since SSO sessions expire within hours.
+//! Polls CloudWatch DescribeAlarms for each configured account and region.
+//! New alarms in ALARM appear as critical islands; an alarm that drops out of
+//! ALARM gets a short "OK" island. Every alarm checked, in any state, goes to
+//! the watch list in the expanded island. A CLI profile works; the
+//! recommended way is an IAM access key whose secret is in the Keychain,
+//! since SSO sessions expire within hours.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -37,22 +37,13 @@ impl CloudWatch {
     }
 
     /// Every watched alarm, in any state; `secret` overrides the Keychain
-    /// (Preferences' Test). One call either way: the CLI pages for us.
+    /// (Preferences' Test).
     fn poll(&self, account: &AwsAccount, secret: Option<&str>) -> Result<Vec<AlarmState>, String> {
-        let mut args = vec![
-            "cloudwatch",
-            "describe-alarms",
-            "--alarm-types",
-            "MetricAlarm",
-            "CompositeAlarm",
-            "--output",
-            "json",
-        ];
-        if let Some(prefix) = account.alarm_prefix.as_deref() {
-            args.extend(["--alarm-name-prefix", prefix]);
-        }
-        let out = aws::cli(self.cli.as_deref(), &args, &creds(account, secret)?)?;
-        let mut alarms = aws::parse_describe_alarms(&out)?;
+        let mut alarms = aws::describe_alarms(
+            self.cli.as_deref(),
+            &creds(account, secret)?,
+            account.alarm_prefix.as_deref(),
+        )?;
         if !account.include.is_empty() {
             alarms.retain(|a| account.include.contains(&a.name));
         }
