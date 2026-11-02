@@ -102,10 +102,26 @@ fn write_file(path: &std::path::Path, store: &FileStore) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// What each Keychain account held when first read, or was last set to.
+/// CloudWatch wants its secret key on every poll, and each read of an item
+/// can ask for the login password (a rebuilt binary isn't yet trusted), so
+/// the Keychain is asked once per launch. A refused read is remembered too:
+/// asking again every minute would only repeat the prompt.
+static CACHE: std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 fn get_raw(account: &str) -> Option<String> {
     if let Some(path) = insecure_file() {
         return read_file(&path).remove(account).filter(|s| !s.is_empty());
     }
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry(account.to_string())
+        .or_insert_with(|| read_keychain(account))
+        .clone()
+}
+
+fn read_keychain(account: &str) -> Option<String> {
     match get_generic_password(&service(), account) {
         Ok(bytes) => String::from_utf8(bytes).ok().filter(|s| !s.is_empty()),
         Err(e) => {
@@ -135,7 +151,13 @@ fn set_raw(account: &str, value: &str) -> Result<(), String> {
     } else {
         set_generic_password(&service(), account, value.as_bytes())
     };
-    result.map_err(|e| format!("keychain {account}: {e}"))
+    result.map_err(|e| format!("keychain {account}: {e}"))?;
+    let stored = Some(value.to_string()).filter(|v| !v.is_empty());
+    CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(account.to_string(), stored);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -43,7 +43,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 # Ad-hoc: no Developer ID yet, so a downloaded copy needs Open from the
 # right-click menu the first time (or: xattr -dr com.apple.quarantine).
-codesign --force --sign - "$APP" >/dev/null
+# SIGN_IDENTITY (e.g. "Apple Development: …") signs local builds with a
+# stable identity instead, so the Keychain's "Always Allow" survives rebuilds.
+codesign --force --sign "${SIGN_IDENTITY:--}" --identifier local.houston "$APP" >/dev/null
 ZIP="dist/Houston-${VERSION//+/-}-macos.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 (cd dist && shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256")
